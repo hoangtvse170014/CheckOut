@@ -365,6 +365,27 @@ class LoggingConfig(BaseSettings):
     )
 
 
+class ProductionConfig(BaseSettings):
+    """Production scheduler configuration."""
+    
+    reset_time: str = Field(
+        default="00:00",
+        description="Daily reset time (HH:MM)"
+    )
+    morning_start: str = Field(
+        default="16:00",
+        description="Morning count phase start (HH:MM)"
+    )
+    morning_end: str = Field(
+        default="16:05",
+        description="Morning count phase end (HH:MM)"
+    )
+    alert_interval_min: int = Field(
+        default=1,
+        description="Alert check interval in minutes"
+    )
+
+
 class Config(BaseSettings):
     """Main application configuration."""
     
@@ -376,6 +397,7 @@ class Config(BaseSettings):
     window: WindowConfig = Field(default_factory=WindowConfig)
     notification: NotificationConfig = Field(default_factory=NotificationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    production: ProductionConfig = Field(default_factory=ProductionConfig)
     
     # Database
     db_path: str = Field(

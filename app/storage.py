@@ -79,6 +79,25 @@ class Storage:
             )
         """)
         
+        # Daily state table: persistent state per day
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_state (
+                date TEXT PRIMARY KEY,
+                total_morning INTEGER DEFAULT 0,
+                is_frozen INTEGER DEFAULT 0,
+                is_missing INTEGER DEFAULT 0,
+                realtime_in INTEGER DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        
+        # Migration: Add realtime_in column if it doesn't exist
+        cursor.execute("PRAGMA table_info(daily_state)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'realtime_in' not in columns:
+            cursor.execute("ALTER TABLE daily_state ADD COLUMN realtime_in INTEGER DEFAULT 0")
+            logger.info("Added realtime_in column to daily_state table")
+        
         # Create indexes
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)
@@ -291,4 +310,140 @@ class Storage:
         
         logger.info(f"Alert saved: date={date}, diff={difference}")
         return alert_id
+    
+    def save_daily_state(
+        self,
+        date: str,
+        total_morning: Optional[int] = None,
+        is_frozen: Optional[bool] = None,
+        is_missing: Optional[bool] = None,
+        realtime_in: Optional[int] = None,
+    ):
+        """
+        Save daily state.
+        
+        Args:
+            date: Date string (YYYY-MM-DD)
+            total_morning: Morning total count
+            is_frozen: Whether morning total is frozen
+            is_missing: Whether alert is active
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        now = datetime.now(self.timezone).isoformat()
+        
+        # Get existing state
+        cursor.execute("SELECT * FROM daily_state WHERE date = ?", (date,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing
+            updates = []
+            params = []
+            
+            if total_morning is not None:
+                updates.append("total_morning = ?")
+                params.append(total_morning)
+            
+            if is_frozen is not None:
+                updates.append("is_frozen = ?")
+                params.append(1 if is_frozen else 0)
+            
+            if is_missing is not None:
+                updates.append("is_missing = ?")
+                params.append(1 if is_missing else 0)
+            
+            if realtime_in is not None:
+                updates.append("realtime_in = ?")
+                params.append(realtime_in)
+            
+            updates.append("updated_at = ?")
+            params.append(now)
+            params.append(date)
+            
+            cursor.execute(
+                f"UPDATE daily_state SET {', '.join(updates)} WHERE date = ?",
+                params
+            )
+        else:
+            # Insert new
+            cursor.execute("""
+                INSERT INTO daily_state 
+                (date, total_morning, is_frozen, is_missing, realtime_in, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                date,
+                total_morning if total_morning is not None else 0,
+                1 if (is_frozen if is_frozen is not None else False) else 0,
+                1 if (is_missing if is_missing is not None else False) else 0,
+                realtime_in if realtime_in is not None else 0,
+                now,
+            ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_daily_state(self, date: str) -> Optional[dict]:
+        """
+        Get daily state.
+        
+        Args:
+            date: Date string (YYYY-MM-DD)
+        
+        Returns:
+            Dictionary with state or None
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM daily_state WHERE date = ?", (date,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            # sqlite3.Row supports dictionary-like indexing (row['column_name'])
+            # Since we control the schema and have migration, we can safely use indexing
+            # For realtime_in, check if column exists (for backward compatibility)
+            realtime_in_value = row['realtime_in'] if 'realtime_in' in row.keys() else 0
+            return {
+                'total_morning': row['total_morning'],
+                'is_frozen': bool(row['is_frozen']),
+                'is_missing': bool(row['is_missing']),
+                'realtime_in': realtime_in_value,
+            }
+        return None
+    
+    def get_events_count_after(
+        self,
+        start_time: datetime,
+        direction: str,
+        camera_id: str,
+    ) -> int:
+        """
+        Get count of events after a specific time.
+        
+        Args:
+            start_time: Start datetime
+            direction: "in" or "out"
+            camera_id: Camera identifier
+        
+        Returns:
+            Count of events
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        start_iso = start_time.isoformat()
+        
+        cursor.execute("""
+            SELECT COUNT(*) as count
+            FROM events
+            WHERE timestamp >= ? AND direction = ? AND camera_id = ?
+        """, (start_iso, direction, camera_id))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        return row['count'] if row else 0
 

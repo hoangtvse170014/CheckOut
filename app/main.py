@@ -4,9 +4,11 @@ import logging
 import signal
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 import cv2
 import numpy as np
+import pytz
 
 from app.config import load_config
 from app.camera import CameraStream
@@ -17,6 +19,9 @@ from app.vision.gate_counter_segment import GateCounterSegment
 from app.storage import Storage
 from app.scheduler import WindowScheduler
 from app.notifier import Notifier
+from app.time_manager import TimeManager
+from app.morning_total_manager import MorningTotalManager
+from app.alert_manager import AlertManager
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +46,9 @@ class PeopleCounterApp:
         self.storage = None
         self.scheduler = None
         self.notifier = None
+        self.time_manager = None
+        self.morning_total_manager = None
+        self.alert_manager = None
         
         # Office occupancy tracking
         self.start_time = None
@@ -205,6 +213,38 @@ class PeopleCounterApp:
             window_b_start=self.config.window.window_b_start,
             window_b_end=self.config.window.window_b_end,
         )
+        
+        # Time Manager
+        self.time_manager = TimeManager(
+            timezone=self.config.window.timezone,
+            reset_time=self.config.production.reset_time,
+            morning_start=self.config.production.morning_start,
+            morning_end=self.config.production.morning_end,
+        )
+        
+        # Morning Total Manager
+        self.morning_total_manager = MorningTotalManager(
+            storage=self.storage,
+            timezone=self.config.window.timezone,
+            morning_start=self.config.production.morning_start,
+            morning_end=self.config.production.morning_end,
+        )
+        
+        # Alert Manager
+        self.alert_manager = AlertManager(
+            storage=self.storage,
+            notifier=self.notifier,
+            time_manager=self.time_manager,
+            morning_total_manager=self.morning_total_manager,
+            camera_id=self.config.camera.camera_id,
+            timezone=self.config.window.timezone,
+            alert_interval_min=self.config.production.alert_interval_min,
+        )
+        
+        # Setup callbacks
+        self.time_manager.on_reset = self._on_daily_reset
+        self.time_manager.on_morning_start = self._on_morning_start
+        self.time_manager.on_morning_end = self._on_morning_end
         
         logger.info("All components initialized")
     
@@ -407,28 +447,45 @@ class PeopleCounterApp:
         counts = self.gate_counter.get_counts()
         
         # Calculate office occupancy
-        if self.start_time:
-            elapsed_time = time.time() - self.start_time
-            is_initial_phase = elapsed_time < self.initial_phase_duration
+        if self.time_manager:
+            # Kiểm tra phase từ time_manager (dựa trên morning_start và morning_end)
+            current_phase = self.time_manager.get_current_phase()
+            now_dt = datetime.now(self.time_manager.tz)
+            current_time = now_dt.time()
             
-            if is_initial_phase:
-                # Phase 1: Hiển thị Total (IN - OUT trong 1 phút đầu)
-                remaining_time = int(self.initial_phase_duration - elapsed_time)
-                total = self.initial_count_in - self.initial_count_out
+            if current_phase.value == "MORNING_COUNT":
+                # Morning phase: Chỉ hiển thị total morning, KHÔNG hiển thị realtime
+                morning_start_time = self.time_manager.morning_start
+                morning_end_time = self.time_manager.morning_end
+                
+                # Tính thời gian còn lại (giây)
+                now_seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
+                end_seconds = morning_end_time.hour * 3600 + morning_end_time.minute * 60
+                remaining_seconds = end_seconds - now_seconds
+                
+                # Chuyển sang giờ:phút:giây
+                remaining_hours = remaining_seconds // 3600
+                remaining_minutes = (remaining_seconds % 3600) // 60
+                remaining_secs = remaining_seconds % 60
+                
+                # Total morning = số người vào (IN) trừ đi số người ra (OUT) trong morning phase
+                total_morning = self.initial_count_in - self.initial_count_out
+                
                 info_text = [
-                    f"=== INITIAL COUNT PHASE ===",
-                    f"Time remaining: {remaining_time}s",
-                    f"Total: {total} (IN: {self.initial_count_in} - OUT: {self.initial_count_out})",
+                    f"=== MORNING COUNT PHASE ===",
+                    f"Time: {morning_start_time.hour:02d}:{morning_start_time.minute:02d} - {morning_end_time.hour:02d}:{morning_end_time.minute:02d}",
+                    f"Time remaining: {remaining_hours}h {remaining_minutes}m {remaining_secs}s",
+                    f"Total Morning: {total_morning} (IN: {self.initial_count_in} - OUT: {self.initial_count_out})",
                     f"FPS: {self.camera.get_fps():.1f}",
                     f"Active Tracks: {len(tracks) if tracks else 0}",
                     "Press 'q' to quit"
                 ]
             else:
-                # Phase 2: Hiển thị Total và Realtime
+                # Realtime monitoring phase: Hiển thị Total và Realtime
                 initial_total = self.initial_count_in - self.initial_count_out
                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
                 info_text = [
-                    f"=== REALTIME TRACKING ===",
+                    f"=== REALTIME MONITORING ===",
                     f"Total: {initial_total} (initial: IN {self.initial_count_in} - OUT {self.initial_count_out})",
                     f"Realtime: {realtime_count} (Total + IN - OUT)",
                     f"  + IN: {self.realtime_in} | - OUT: {self.realtime_out}",
@@ -437,7 +494,7 @@ class PeopleCounterApp:
                     "Press 'q' to quit"
                 ]
         else:
-            # Fallback if start_time not set
+            # Fallback if time_manager not set
             info_text = [
                 f"IN: {counts['in']} | OUT: {counts['out']}",
                 f"FPS: {self.camera.get_fps():.1f}",
@@ -463,6 +520,40 @@ class PeopleCounterApp:
         
         return overlay
     
+    def _on_daily_reset(self):
+        """Handle daily reset callback."""
+        # Reset morning total manager
+        if self.morning_total_manager:
+            self.morning_total_manager.reset()
+        
+        # Reset alert manager
+        if self.alert_manager:
+            self.alert_manager.reset()
+        
+        # Reset local counters
+        self.initial_count_in = 0
+        self.initial_count_out = 0
+        self.realtime_in = 0
+        self.realtime_out = 0
+    
+    def _on_morning_start(self):
+        """Handle morning phase start callback."""
+        # Morning phase started, allow counting
+        pass
+    
+    def _on_morning_end(self):
+        """Handle morning phase end callback."""
+        # Lưu total_morning = initial_count_in - initial_count_out (số người vào trừ đi số người ra)
+        tz = pytz.timezone(self.config.window.timezone)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        total_morning = self.initial_count_in - self.initial_count_out  # IN - OUT
+        self.storage.save_daily_state(date=today, total_morning=total_morning, is_frozen=True)
+        logger.info(f"Morning phase ended: Saved total_morning={total_morning} (IN: {self.initial_count_in} - OUT: {self.initial_count_out})")
+        
+        # Freeze morning total manager (nếu có)
+        if self.morning_total_manager:
+            self.morning_total_manager.freeze()
+    
     def run(self):
         """Run main loop."""
         logger.info("Starting People Counter MVP...")
@@ -475,8 +566,10 @@ class PeopleCounterApp:
             logger.error("Failed to connect to camera, exiting")
             return
         
-        # Start scheduler
+        # Start schedulers
         self.scheduler.start()
+        self.time_manager.start()
+        self.alert_manager.start()
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -574,24 +667,38 @@ class PeopleCounterApp:
                     event = self.gate_counter.update(track_id, bottom_center, current_ts)
                     
                     if event:
-                        # Track office occupancy based on phase
-                        if is_initial_phase:
-                            # Phase 1: Đếm cả IN và OUT trong 1 phút đầu
+                        # Track office occupancy based on TimeManager phase
+                        # Kiểm tra phase từ time_manager (MORNING_COUNT hoặc REALTIME_MONITORING)
+                        if self.time_manager:
+                            current_phase = self.time_manager.get_current_phase()
+                            is_morning_phase = (current_phase.value == "MORNING_COUNT")
+                        else:
+                            # Fallback: dùng logic cũ (1 phút đầu)
+                            is_morning_phase = is_initial_phase
+                        
+                        if is_morning_phase:
+                            # Morning phase: Đếm vào initial_count_in/out (total morning)
                             if event.direction == "IN":
                                 self.initial_count_in += 1
                                 total = self.initial_count_in - self.initial_count_out
-                                logger.info(f"Initial phase: Person entered. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                                logger.info(f"Morning phase: Person entered. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
                             elif event.direction == "OUT":
                                 self.initial_count_out += 1
                                 total = self.initial_count_in - self.initial_count_out
-                                logger.info(f"Initial phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                                logger.info(f"Morning phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
                         else:
-                            # Phase 2: Realtime tracking sau 1 phút
+                            # Realtime monitoring phase: Đếm vào realtime_in/out
                             if event.direction == "IN":
                                 self.realtime_in += 1
                                 initial_total = self.initial_count_in - self.initial_count_out
                                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
                                 logger.info(f"Realtime: Person entered. Realtime IN: {self.realtime_in}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
+                                
+                                # Lưu realtime_in vào state để alert_manager sử dụng
+                                tz = pytz.timezone(self.config.window.timezone)
+                                today = datetime.now(tz).strftime("%Y-%m-%d")
+                                self.storage.save_daily_state(date=today, realtime_in=self.realtime_in)
+                                
                             elif event.direction == "OUT":
                                 self.realtime_out += 1
                                 initial_total = self.initial_count_in - self.initial_count_out
@@ -647,6 +754,12 @@ class PeopleCounterApp:
     def shutdown(self):
         """Shutdown application."""
         logger.info("Shutting down...")
+        
+        if self.alert_manager:
+            self.alert_manager.stop()
+        
+        if self.time_manager:
+            self.time_manager.stop()
         
         if self.scheduler:
             self.scheduler.stop()

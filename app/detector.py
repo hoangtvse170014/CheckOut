@@ -130,7 +130,7 @@ class PersonDetector:
                     elif len(boxes) > 0:
                         # If no track IDs yet, assign temporary IDs based on box position
                         # This can happen in the first few frames before tracking stabilizes
-                        for idx, (box, conf) in enumerate(zip(boxes, confidences)):
+                        for box, conf in zip(boxes, confidences):
                             x1, y1, x2, y2 = box
                             # Use a temporary ID based on box center
                             temp_id = int((x1 + x2) / 2) + int((y1 + y2) * 1000)
