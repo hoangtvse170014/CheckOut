@@ -1,0 +1,56 @@
+# People Counter MVP Configuration Example
+# Copy this file to config.yaml and modify as needed
+# Or use .env file with environment variables (see README.md)
+
+camera:
+  url: "0"  # USB camera index or RTSP URL like "rtsp://user:pass@ip:port/stream"
+  reconnect_delay: 5.0
+  max_reconnect_attempts: 10
+  fps_cap: 10
+  camera_id: "camera_01"
+
+detection:
+  model_name: "yolov8n.pt"  # yolov8n.pt (CPU), yolov8s.pt (GPU)
+  conf_threshold: 0.5
+  iou_threshold: 0.5
+  device: "cpu"  # cpu, cuda, mps
+
+tracking:
+  tracker_type: "bytetrack"  # bytetrack or deepsort
+  track_thresh: 0.5
+  track_buffer: 30
+  match_thresh: 0.8
+
+line:
+  line_start: [0, 240]  # [x, y] coordinates
+  line_end: [640, 240]
+  min_track_length: 5
+  cooldown_frames: 30
+
+window:
+  timezone: "Asia/Bangkok"
+  window_a_start: "12:00"
+  window_a_end: "12:59"
+  window_b_start: "13:00"
+  window_b_end: "13:59"
+
+notification:
+  enabled: false
+  channel: "telegram"  # telegram, email, webhook
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  email_smtp_host: "smtp.gmail.com"
+  email_smtp_port: 587
+  email_from: ""
+  email_to: ""
+  email_password: ""
+  webhook_url: ""
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+db_path: "people_counter.db"
+save_snapshots: true
+snapshot_dir: "snapshots"
+
