@@ -373,11 +373,11 @@ class ProductionConfig(BaseSettings):
         description="Daily reset time (HH:MM)"
     )
     morning_start: str = Field(
-        default="16:00",
+        default="16:36",
         description="Morning count phase start (HH:MM)"
     )
     morning_end: str = Field(
-        default="16:05",
+        default="16:40",
         description="Morning count phase end (HH:MM)"
     )
     alert_interval_min: int = Field(

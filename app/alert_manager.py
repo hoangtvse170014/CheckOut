@@ -102,41 +102,37 @@ class AlertManager:
         
         # Only check in REALTIME_MONITORING phase
         if phase != Phase.REALTIME_MONITORING:
-            logger.debug(f"Not in REALTIME_MONITORING phase, skipping alert check")
+            logger.info(f"Alert check skipped: Not in REALTIME_MONITORING phase (current phase: {phase.value})")
             return
         
-        # Lấy total_morning và realtime_in từ state (đã được lưu từ logic đếm ban đầu)
+        # Lấy total_morning, realtime_in và realtime_out từ state (đã được lưu từ logic đếm ban đầu)
         state = self.storage.get_daily_state(date)
         if state:
             total_morning = state.get('total_morning', 0)
             realtime_in = state.get('realtime_in', 0)
+            realtime_out = state.get('realtime_out', 0)
         else:
             total_morning = 0
             realtime_in = 0
+            realtime_out = 0
         
         # Fail-safe: Don't alert if total_morning == 0
         if total_morning == 0:
-            logger.debug("total_morning is 0, skipping alert (likely day off or camera error)")
+            logger.info(f"Alert check skipped: total_morning is 0 (likely day off or camera error), realtime_in={realtime_in}, realtime_out={realtime_out}")
             return
         
-        # Tính realtime_count (total realtime) = total_morning + realtime_in
+        # Tính realtime_count (total realtime) = total_morning + (realtime_in - realtime_out)
         # Theo logic trong main.py: realtime_count = initial_total + (realtime_in - realtime_out)
         # Trong đó initial_total = initial_count_in - initial_count_out = total_morning
         # Vậy realtime_count = total_morning + (realtime_in - realtime_out)
-        # Vì realtime_out không được lưu, tạm thời giả sử realtime_out = 0
-        # Hoặc có thể tính realtime_count từ events, nhưng để đơn giản:
-        # realtime_count = total_morning + realtime_in (nếu chỉ tính người vào)
-        # Thực ra, theo logic hiện tại: realtime_count là số người hiện tại
-        # = total_morning + (realtime_in - realtime_out)
+        realtime_count = total_morning + (realtime_in - realtime_out)
         
-        # Vì chỉ có realtime_in, tạm thời dùng:
-        realtime_count = total_morning + realtime_in
+        # Log values for debugging (INFO level để dễ theo dõi)
+        logger.info(f"Alert check: date={date}, total_morning={total_morning}, realtime_in={realtime_in}, realtime_out={realtime_out}, realtime_count={realtime_count}, is_missing={self.is_missing}, missing_detected_at={self.missing_detected_at}")
         
         # Check condition: realtime_count < total_morning (people missing)
-        # Điều kiện này sẽ luôn false vì realtime_count >= total_morning
-        # Có thể người dùng muốn so sánh khác? 
-        # Tạm thời giữ nguyên logic cũ: realtime_in < total_morning
-        if realtime_in < total_morning:
+        # Điều kiện này đúng khi số người hiện tại < số người buổi sáng
+        if realtime_count < total_morning:
             # Nếu chưa phát hiện lần đầu, lưu thời điểm phát hiện
             if self.missing_detected_at is None:
                 self.missing_detected_at = now
@@ -152,8 +148,7 @@ class AlertManager:
                     self._save_alert_state()
                     
                     # Tính số người vắng = total_morning - realtime_count (tính lại với giá trị mới nhất)
-                    # realtime_count = total_morning + realtime_in (giả sử realtime_out = 0)
-                    realtime_count_latest = total_morning + realtime_in
+                    realtime_count_latest = total_morning + (realtime_in - realtime_out)
                     missing_count = total_morning - realtime_count_latest
                     
                     # Send alert với thông báo "Vắng X người"
@@ -168,7 +163,9 @@ class AlertManager:
                         f"Time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     )
                     
+                    logger.info(f"Attempting to send alert email: enabled={self.notifier.enabled}, channel={self.notifier.channel}")
                     success = self.notifier.send(message)
+                    logger.info(f"Email send result: success={success}")
                     
                     # Save alert record
                     self.storage.save_alert(
@@ -181,15 +178,17 @@ class AlertManager:
                         notification_status="sent" if success else "failed",
                     )
                     
-                    logger.info(f"Alert sent after 1 minute: total_morning={total_morning}, realtime_in={realtime_in}, missing={missing_count}")
+                    logger.info(f"Alert sent after 1 minute: total_morning={total_morning}, realtime_count={realtime_count_latest}, missing={missing_count}")
         else:
-            # Enough people have returned
+            # Enough people have returned (realtime_count >= total_morning)
             if self.missing_detected_at is not None:
                 # Reset alert state
                 self.missing_detected_at = None
                 self.is_missing = False
                 self._save_alert_state()
-                logger.info(f"Alert reset: All people returned (total_morning={total_morning}, realtime_in={realtime_in})")
+                logger.info(f"Alert reset: All people returned (total_morning={total_morning}, realtime_count={realtime_count})")
+            else:
+                logger.info(f"Alert check: No missing people (total_morning={total_morning}, realtime_count={realtime_count})")
     
     def _save_alert_state(self):
         """Save alert state to storage."""

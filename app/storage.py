@@ -91,12 +91,15 @@ class Storage:
             )
         """)
         
-        # Migration: Add realtime_in column if it doesn't exist
+        # Migration: Add realtime_in and realtime_out columns if they don't exist
         cursor.execute("PRAGMA table_info(daily_state)")
         columns = [row[1] for row in cursor.fetchall()]
         if 'realtime_in' not in columns:
             cursor.execute("ALTER TABLE daily_state ADD COLUMN realtime_in INTEGER DEFAULT 0")
             logger.info("Added realtime_in column to daily_state table")
+        if 'realtime_out' not in columns:
+            cursor.execute("ALTER TABLE daily_state ADD COLUMN realtime_out INTEGER DEFAULT 0")
+            logger.info("Added realtime_out column to daily_state table")
         
         # Create indexes
         cursor.execute("""
@@ -318,6 +321,7 @@ class Storage:
         is_frozen: Optional[bool] = None,
         is_missing: Optional[bool] = None,
         realtime_in: Optional[int] = None,
+        realtime_out: Optional[int] = None,
     ):
         """
         Save daily state.
@@ -327,6 +331,8 @@ class Storage:
             total_morning: Morning total count
             is_frozen: Whether morning total is frozen
             is_missing: Whether alert is active
+            realtime_in: Realtime IN count (after morning phase)
+            realtime_out: Realtime OUT count (after morning phase)
         """
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -358,6 +364,10 @@ class Storage:
                 updates.append("realtime_in = ?")
                 params.append(realtime_in)
             
+            if realtime_out is not None:
+                updates.append("realtime_out = ?")
+                params.append(realtime_out)
+            
             updates.append("updated_at = ?")
             params.append(now)
             params.append(date)
@@ -370,14 +380,15 @@ class Storage:
             # Insert new
             cursor.execute("""
                 INSERT INTO daily_state 
-                (date, total_morning, is_frozen, is_missing, realtime_in, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (date, total_morning, is_frozen, is_missing, realtime_in, realtime_out, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 date,
                 total_morning if total_morning is not None else 0,
                 1 if (is_frozen if is_frozen is not None else False) else 0,
                 1 if (is_missing if is_missing is not None else False) else 0,
                 realtime_in if realtime_in is not None else 0,
+                realtime_out if realtime_out is not None else 0,
                 now,
             ))
         
@@ -404,13 +415,15 @@ class Storage:
         if row:
             # sqlite3.Row supports dictionary-like indexing (row['column_name'])
             # Since we control the schema and have migration, we can safely use indexing
-            # For realtime_in, check if column exists (for backward compatibility)
+            # For realtime_in and realtime_out, check if column exists (for backward compatibility)
             realtime_in_value = row['realtime_in'] if 'realtime_in' in row.keys() else 0
+            realtime_out_value = row['realtime_out'] if 'realtime_out' in row.keys() else 0
             return {
                 'total_morning': row['total_morning'],
                 'is_frozen': bool(row['is_frozen']),
                 'is_missing': bool(row['is_missing']),
                 'realtime_in': realtime_in_value,
+                'realtime_out': realtime_out_value,
             }
         return None
     

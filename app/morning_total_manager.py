@@ -17,8 +17,8 @@ class MorningTotalManager:
         self,
         storage: Storage,
         timezone: str = "Asia/Bangkok",
-        morning_start: str = "16:00",
-        morning_end: str = "16:05",
+        morning_start: str = "16:36",
+        morning_end: str = "16:40",
     ):
         """
         Initialize morning total manager.

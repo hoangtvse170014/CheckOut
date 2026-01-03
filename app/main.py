@@ -704,6 +704,11 @@ class PeopleCounterApp:
                                 initial_total = self.initial_count_in - self.initial_count_out
                                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
                                 logger.info(f"Realtime: Person exited. Realtime OUT: {self.realtime_out}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
+                                
+                                # Lưu realtime_out vào state để alert_manager sử dụng
+                                tz = pytz.timezone(self.config.window.timezone)
+                                today = datetime.now(tz).strftime("%Y-%m-%d")
+                                self.storage.save_daily_state(date=today, realtime_out=self.realtime_out)
                         
                         # Save event to database
                         self.storage.add_event(

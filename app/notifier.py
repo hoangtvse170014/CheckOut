@@ -111,16 +111,17 @@ class Notifier:
     def _send_email(self, message: str) -> bool:
         """Send email."""
         if not self.email_from or not self.email_to or not self.email_password:
-            logger.warning("Email credentials not configured")
+            logger.warning(f"Email credentials not configured: from={bool(self.email_from)}, to={bool(self.email_to)}, password={bool(self.email_password)}")
             return False
         
         try:
+            logger.info(f"Sending email from {self.email_from} to {self.email_to} via {self.email_smtp_host}:{self.email_smtp_port}")
             msg = MIMEMultipart()
             msg["From"] = self.email_from
             msg["To"] = self.email_to
             msg["Subject"] = "People Counter Alert"
             
-            msg.attach(MIMEText(message, "plain"))
+            msg.attach(MIMEText(message, "plain", "utf-8"))
             
             with smtplib.SMTP(self.email_smtp_host, self.email_smtp_port) as server:
                 server.starttls()
@@ -130,7 +131,7 @@ class Notifier:
             logger.info("Email notification sent successfully")
             return True
         except Exception as e:
-            logger.error(f"Failed to send email notification: {e}")
+            logger.error(f"Failed to send email notification: {e}", exc_info=True)
             return False
     
     def _send_webhook(self, message: str) -> bool:
