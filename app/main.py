@@ -24,6 +24,7 @@ from app.morning_total_manager import MorningTotalManager
 from app.alert_manager import AlertManager
 from storage.postgres_writer import PostgresWriter
 from scheduler.excel_export_scheduler import ExcelExportScheduler
+from app.web_server import WebServer
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class PeopleCounterApp:
         self.alert_manager = None
         self.postgres_writer = None
         self.excel_export_scheduler = None
+        self.web_server = None
         
         # Office occupancy tracking
         self.start_time = None
@@ -271,6 +273,13 @@ class PeopleCounterApp:
         self.excel_export_scheduler = ExcelExportScheduler(
             db_path=self.config.db_path,
             exports_dir="exports"
+        )
+        
+        # Web Server for LAN access
+        self.web_server = WebServer(
+            app_instance=self,
+            host='0.0.0.0',
+            port=5000
         )
         
         logger.info("All components initialized")
@@ -610,6 +619,10 @@ class PeopleCounterApp:
         self.alert_manager.start()
         self.excel_export_scheduler.start()
         
+        # Start web server
+        if self.web_server:
+            self.web_server.start()
+        
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -900,6 +913,11 @@ class PeopleCounterApp:
                 # Display frame with overlay (include tracks for visualization)
                 # Draw overlay every frame to avoid flickering
                 overlay = self._draw_overlay(frame, tracks)
+                
+                # Update web server with current frame
+                if self.web_server:
+                    self.web_server.update_frame(overlay)
+                
                 cv2.imshow("People Counter", overlay)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
@@ -920,6 +938,9 @@ class PeopleCounterApp:
         """Shutdown application gracefully."""
         logger.info("Shutting down application...")
         self.running = False
+        
+        if self.web_server:
+            self.web_server.stop()
         
         # Force final Excel export before shutdown
         if self.excel_export_scheduler:
