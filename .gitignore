@@ -50,6 +50,31 @@ snapshots/
 *.jpg
 *.png
 
+# Exports
+exports/
+backup/
+
+# Data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Test/Check scripts (temporary)
+check_*.py
+test_*.py
+view_*.py
+query_*.py
+*_status_report.py
+*_now.py
+force_*.py
+sync_*.py
+wait_*.py
+create_*.py
+export_from_*.py
+save_*.py
+
 # Models (optional - uncomment if you don't want to track downloaded models)
 # *.pt
 

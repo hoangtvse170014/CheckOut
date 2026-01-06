@@ -373,16 +373,55 @@ class ProductionConfig(BaseSettings):
         description="Daily reset time (HH:MM)"
     )
     morning_start: str = Field(
-        default="16:36",
+        default="16:27",
         description="Morning count phase start (HH:MM)"
     )
     morning_end: str = Field(
-        default="16:40",
+        default="16:33",
         description="Morning count phase end (HH:MM)"
     )
     alert_interval_min: int = Field(
         default=1,
         description="Alert check interval in minutes"
+    )
+
+
+class PostgresConfig(BaseSettings):
+    """PostgreSQL database configuration."""
+    
+    enabled: bool = Field(
+        default=False,
+        description="Enable PostgreSQL storage"
+    )
+    host: str = Field(
+        default="localhost",
+        description="PostgreSQL host"
+    )
+    port: int = Field(
+        default=5432,
+        description="PostgreSQL port"
+    )
+    database: str = Field(
+        default="people_counter",
+        description="PostgreSQL database name"
+    )
+    user: str = Field(
+        default="postgres",
+        description="PostgreSQL user"
+    )
+    password: str = Field(
+        default="",
+        description="PostgreSQL password"
+    )
+    min_connections: int = Field(
+        default=1,
+        ge=1,
+        description="Minimum connection pool size"
+    )
+    max_connections: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum connection pool size"
     )
 
 
@@ -398,10 +437,11 @@ class Config(BaseSettings):
     notification: NotificationConfig = Field(default_factory=NotificationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     production: ProductionConfig = Field(default_factory=ProductionConfig)
+    postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     
     # Database
     db_path: str = Field(
-        default="people_counter.db",
+        default="data/people_counter.db",
         description="SQLite database path"
     )
     

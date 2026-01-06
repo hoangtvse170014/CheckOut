@@ -24,8 +24,8 @@ class TimeManager:
         self,
         timezone: str = "Asia/Bangkok",
         reset_time: str = "00:00",
-        morning_start: str = "16:36",
-        morning_end: str = "16:40",
+        morning_start: str = "16:27",
+        morning_end: str = "16:33",
     ):
         """
         Initialize time manager.
@@ -69,9 +69,14 @@ class TimeManager:
         now = datetime.now(self.tz)
         current_time = now.time()
         
+        # Debug logging
+        logger.debug(f"Checking phase: current_time={current_time.strftime('%H:%M:%S')}, morning_start={self.morning_start.strftime('%H:%M')}, morning_end={self.morning_end.strftime('%H:%M')}")
+        
         if self.morning_start <= current_time < self.morning_end:
+            logger.debug(f"In MORNING_COUNT phase")
             return Phase.MORNING_COUNT
         else:
+            logger.debug(f"In REALTIME_MONITORING phase")
             return Phase.REALTIME_MONITORING
     
     def _schedule_jobs(self):
@@ -134,7 +139,10 @@ class TimeManager:
     def get_current_phase(self) -> Phase:
         """Get current phase."""
         # Update phase based on current time
-        self.current_phase = self._get_current_phase()
+        new_phase = self._get_current_phase()
+        if new_phase != self.current_phase:
+            logger.info(f"Phase changed: {self.current_phase.value} -> {new_phase.value} (current time: {datetime.now(self.tz).strftime('%H:%M:%S')})")
+            self.current_phase = new_phase
         return self.current_phase
     
     def start(self):

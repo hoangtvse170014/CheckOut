@@ -22,6 +22,8 @@ from app.notifier import Notifier
 from app.time_manager import TimeManager
 from app.morning_total_manager import MorningTotalManager
 from app.alert_manager import AlertManager
+from storage.postgres_writer import PostgresWriter
+from scheduler.excel_export_scheduler import ExcelExportScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ class PeopleCounterApp:
         self.time_manager = None
         self.morning_total_manager = None
         self.alert_manager = None
+        self.postgres_writer = None
+        self.excel_export_scheduler = None
         
         # Office occupancy tracking
         self.start_time = None
@@ -182,11 +186,28 @@ class PeopleCounterApp:
                     rearm_dist_px=self.config.gate.rearm_dist_px,
                 )
         
-        # Storage
-        self.storage = Storage(
-            db_path=self.config.db_path,
-            timezone=self.config.window.timezone,
-        )
+        # Storage - MANDATORY: app will not start if database init fails
+        try:
+            self.storage = Storage(
+                db_path=self.config.db_path,
+                timezone=self.config.window.timezone,
+            )
+            logger.info("SQLite storage initialized successfully")
+        except RuntimeError as e:
+            logger.critical(f"CRITICAL: Cannot start application without database: {e}")
+            raise
+        
+        # PostgreSQL (optional, reads from environment variables)
+        try:
+            self.postgres_writer = PostgresWriter()
+            if self.postgres_writer._initialized:
+                logger.info("PostgreSQL storage enabled")
+            else:
+                self.postgres_writer = None
+                logger.info("PostgreSQL storage disabled (using SQLite only)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize PostgreSQL writer: {e}")
+            self.postgres_writer = None
         
         # Notifier
         self.notifier = Notifier(
@@ -245,6 +266,12 @@ class PeopleCounterApp:
         self.time_manager.on_reset = self._on_daily_reset
         self.time_manager.on_morning_start = self._on_morning_start
         self.time_manager.on_morning_end = self._on_morning_end
+        
+        # Excel Export Scheduler (use same database path as app)
+        self.excel_export_scheduler = ExcelExportScheduler(
+            db_path=self.config.db_path,
+            exports_dir="exports"
+        )
         
         logger.info("All components initialized")
     
@@ -547,8 +574,19 @@ class PeopleCounterApp:
         tz = pytz.timezone(self.config.window.timezone)
         today = datetime.now(tz).strftime("%Y-%m-%d")
         total_morning = self.initial_count_in - self.initial_count_out  # IN - OUT
+        
+        # Also calculate from database events as backup
+        morning_start = self.time_manager.morning_start.strftime('%H:%M')
+        morning_end = self.time_manager.morning_end.strftime('%H:%M')
+        total_morning_from_db = self.storage.get_total_morning_from_events(today, morning_start, morning_end)
+        
+        # Use the maximum of in-memory and database values (to handle race conditions)
+        if total_morning_from_db != total_morning:
+            logger.warning(f"total_morning mismatch: in-memory={total_morning}, from_db={total_morning_from_db}, using max")
+            total_morning = max(total_morning, total_morning_from_db)
+        
         self.storage.save_daily_state(date=today, total_morning=total_morning, is_frozen=True)
-        logger.info(f"Morning phase ended: Saved total_morning={total_morning} (IN: {self.initial_count_in} - OUT: {self.initial_count_out})")
+        logger.info(f"Morning phase ended: Saved total_morning={total_morning} (IN: {self.initial_count_in} - OUT: {self.initial_count_out}, from_db: {total_morning_from_db})")
         
         # Freeze morning total manager (nếu có)
         if self.morning_total_manager:
@@ -570,6 +608,7 @@ class PeopleCounterApp:
         self.scheduler.start()
         self.time_manager.start()
         self.alert_manager.start()
+        self.excel_export_scheduler.start()
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -578,13 +617,82 @@ class PeopleCounterApp:
         self.running = True
         logger.info("Main loop started")
         
+        # DIAGNOSTIC: Force test insert to verify database writes work
+        try:
+            logger.info(f"DIAGNOSTIC: Testing database write to {Path(self.config.db_path).resolve()}")
+            test_in_id = self.storage.add_event(
+                track_id=999998,
+                direction='IN',
+                camera_id='startup_test'
+            )
+            test_out_id = self.storage.add_event(
+                track_id=999999,
+                direction='OUT',
+                camera_id='startup_test'
+            )
+            if test_in_id and test_out_id:
+                logger.info(f"DIAGNOSTIC: Test inserts successful - IN id={test_in_id}, OUT id={test_out_id}")
+            else:
+                logger.error(f"DIAGNOSTIC: Test inserts FAILED - IN id={test_in_id}, OUT id={test_out_id}")
+        except Exception as e:
+            logger.error(f"DIAGNOSTIC: Test insert error: {e}", exc_info=True)
+        
         # Initialize office occupancy tracking
         self.start_time = time.time()
-        self.initial_count_in = 0
-        self.initial_count_out = 0
-        self.realtime_in = 0
-        self.realtime_out = 0
-        logger.info("Office occupancy tracking initialized: 1-minute initial count phase (IN and OUT)")
+        
+        # Sync counters from database if available
+        tz = pytz.timezone(self.config.window.timezone)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        state = self.storage.get_daily_state(today)
+        
+        if state:
+            # Load from state
+            self.realtime_in = state.get('realtime_in', 0)
+            self.realtime_out = state.get('realtime_out', 0)
+            
+            # Calculate initial_count_in/out from total_morning and events
+            total_morning = state.get('total_morning', 0)
+            if total_morning is None or total_morning == 0:
+                # Calculate from morning phase events
+                morning_start = self.time_manager.morning_start.strftime('%H:%M')
+                morning_end = self.time_manager.morning_end.strftime('%H:%M')
+                total_morning = self.storage.get_total_morning_from_events(today, morning_start, morning_end)
+            
+            # Estimate initial counts from total_morning (we don't store them separately)
+            # We'll recalculate from morning phase events
+            morning_start = self.time_manager.morning_start.strftime('%H:%M')
+            morning_end = self.time_manager.morning_end.strftime('%H:%M')
+            conn = self.storage._get_connection()
+            cursor = conn.cursor()
+            start_hour, start_min = map(int, morning_start.split(':'))
+            end_hour, end_min = map(int, morning_end.split(':'))
+            cursor.execute("""
+                SELECT direction, COUNT(*) as count
+                FROM people_events
+                WHERE date(event_time) = ?
+                  AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) >= ?
+                  AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) < ?
+                GROUP BY direction
+            """, (today, start_hour * 60 + start_min, end_hour * 60 + end_min))
+            results = cursor.fetchall()
+            self.initial_count_in = 0
+            self.initial_count_out = 0
+            for direction, count in results:
+                if direction == 'IN':
+                    self.initial_count_in = count
+                elif direction == 'OUT':
+                    self.initial_count_out = count
+            conn.close()
+            
+            logger.info(f"Synced counters from database: initial IN={self.initial_count_in}, OUT={self.initial_count_out}, realtime IN={self.realtime_in}, OUT={self.realtime_out}, total_morning={total_morning}")
+        else:
+            self.initial_count_in = 0
+            self.initial_count_out = 0
+            self.realtime_in = 0
+            self.realtime_out = 0
+            logger.info("No existing state, starting with zero counters")
+        
+        logger.info("Office occupancy tracking initialized")
         
         # Create snapshot directory if needed
         if self.config.save_snapshots:
@@ -592,6 +700,8 @@ class PeopleCounterApp:
         
         frame_count = 0
         last_log_time = time.time()
+        self_test_inserted = False
+        self_test_check_time = time.time()
         
         try:
             while self.running:
@@ -686,6 +796,12 @@ class PeopleCounterApp:
                                 self.initial_count_out += 1
                                 total = self.initial_count_in - self.initial_count_out
                                 logger.info(f"Morning phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                            
+                            # Lưu total_morning ngay khi có events (để alert_manager có thể check)
+                            tz = pytz.timezone(self.config.window.timezone)
+                            today = datetime.now(tz).strftime("%Y-%m-%d")
+                            total_morning = self.initial_count_in - self.initial_count_out
+                            self.storage.save_daily_state(date=today, total_morning=total_morning)
                         else:
                             # Realtime monitoring phase: Đếm vào realtime_in/out
                             if event.direction == "IN":
@@ -711,11 +827,26 @@ class PeopleCounterApp:
                                 self.storage.save_daily_state(date=today, realtime_out=self.realtime_out)
                         
                         # Save event to database
-                        self.storage.add_event(
+                        # SQLite (always save for compatibility with existing code)
+                        event_id = self.storage.add_event(
                             track_id=track_id,
                             direction=event.direction.lower(),
                             camera_id=self.config.camera.camera_id,
                         )
+                        if event_id:
+                            logger.info(f"Event saved to database: id={event_id}, direction={event.direction}, track_id={track_id}")
+                        else:
+                            logger.error(f"FAILED to save event to database: direction={event.direction}, track_id={track_id}")
+                        
+                        # PostgreSQL (if enabled, non-blocking)
+                        if self.postgres_writer:
+                            # Convert Unix timestamp to datetime
+                            event_time = datetime.fromtimestamp(event.timestamp)
+                            self.postgres_writer.write_event(
+                                event_time=event_time,
+                                direction=event.direction,
+                                camera_id=self.config.camera.camera_id,
+                            )
                         
                         # Save snapshot if enabled
                         if self.config.save_snapshots:
@@ -723,8 +854,37 @@ class PeopleCounterApp:
                             snapshot_path = Path(self.config.snapshot_dir) / f"gate_{track_id}_{event.direction}_{timestamp}.jpg"
                             cv2.imwrite(str(snapshot_path), frame)
                 
-                # Log metrics periodically
+                # Self-test insert: If no events exist after 60 seconds, insert a test event
                 current_time = time.time()
+                if not self_test_inserted and (current_time - self_test_check_time) >= 60:
+                    # Check if any events exist
+                    try:
+                        import sqlite3
+                        conn = sqlite3.connect(self.config.db_path, check_same_thread=False)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT COUNT(*) FROM people_events")
+                        event_count = cursor.fetchone()[0]
+                        conn.close()
+                        
+                        if event_count == 0:
+                            # Insert self-test event
+                            test_event_id = self.storage.add_event(
+                                track_id=999999,
+                                direction='IN',
+                                camera_id='self_test'
+                            )
+                            if test_event_id:
+                                logger.info(f"SELF_TEST_EVENT_INSERTED: id={test_event_id}, direction=IN, camera_id=self_test")
+                            else:
+                                logger.error("SELF_TEST_EVENT_INSERTED: FAILED to insert test event")
+                        else:
+                            logger.debug(f"Self-test skipped: {event_count} events already exist")
+                    except Exception as e:
+                        logger.error(f"Self-test insert error: {e}", exc_info=True)
+                    
+                    self_test_inserted = True
+                
+                # Log metrics periodically
                 loop_time = current_time - loop_start
                 
                 if current_time - last_log_time >= 5:  # Every 5 seconds for debugging
@@ -757,8 +917,25 @@ class PeopleCounterApp:
         self.running = False
     
     def shutdown(self):
-        """Shutdown application."""
-        logger.info("Shutting down...")
+        """Shutdown application gracefully."""
+        logger.info("Shutting down application...")
+        self.running = False
+        
+        # Force final Excel export before shutdown
+        if self.excel_export_scheduler:
+            try:
+                from datetime import datetime
+                today = datetime.now().strftime('%Y-%m-%d')
+                from pathlib import Path
+                output_file = Path("exports") / "daily" / f"people_counter_{today}.xlsx"
+                logger.info("Forcing final Excel export before shutdown...")
+                self.excel_export_scheduler._export_daily_excel(today, output_file)
+            except Exception as e:
+                logger.error(f"Error during final export: {e}", exc_info=True)
+            self.excel_export_scheduler.stop()
+        
+        if self.postgres_writer:
+            self.postgres_writer.close()
         
         if self.alert_manager:
             self.alert_manager.stop()
