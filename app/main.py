@@ -241,8 +241,8 @@ class PeopleCounterApp:
         self.time_manager = TimeManager(
             timezone=self.config.window.timezone,
             reset_time=self.config.production.reset_time,
-            morning_start=self.config.production.morning_start,
-            morning_end=self.config.production.morning_end,
+            morning_start="11:05",
+            morning_end="11:14",
         )
         
         # Morning Total Manager
@@ -255,6 +255,7 @@ class PeopleCounterApp:
         
         # Alert Manager
         self.alert_manager = AlertManager(
+            config=self.config,
             storage=self.storage,
             notifier=self.notifier,
             time_manager=self.time_manager,

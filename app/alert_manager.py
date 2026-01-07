@@ -19,6 +19,7 @@ class AlertManager:
     
     def __init__(
         self,
+        config,
         storage: Storage,
         notifier: Notifier,
         time_manager,
@@ -39,6 +40,7 @@ class AlertManager:
             timezone: Timezone string
             alert_interval_min: Alert check interval in minutes
         """
+        self.config = config
         self.storage = storage
         self.notifier = notifier
         self.time_manager = time_manager
@@ -120,8 +122,11 @@ class AlertManager:
             else:
                 total_morning = 0
         
-        # Fail-safe: Don't alert if total_morning == 0 AND no morning events exist
-        if total_morning == 0:
+        # Check config for force alert option
+        force_alert = getattr(self.config.production, 'force_alert_on_missing', False)
+
+        # Fail-safe: Don't alert if total_morning == 0 AND no morning events exist (unless forced)
+        if total_morning == 0 and not force_alert:
             # Check if there are any events in morning phase
             if self.time_manager:
                 morning_start = self.time_manager.morning_start.strftime('%H:%M')
@@ -145,9 +150,20 @@ class AlertManager:
         logger.info(f"Alert check: date={date}, total_morning={total_morning}, realtime_count={realtime_count}, is_missing={self.is_missing}, missing_detected_at={self.missing_detected_at}")
         
         # Check condition: total_morning > realtime_count (people missing)
+        # Or force alert if total_morning = 0 and past morning phase (no attendance)
         # Thuật toán: nếu total_morning > realtime_count thì thiếu người
-        # Đảm bảo gửi mail khi total_morning > realtime_count sau 1 phút
-        if total_morning > realtime_count:
+        # Hoặc nếu total_morning = 0 và đã qua morning phase thì cảnh báo không có ai đi làm
+        force_alert_on_no_attendance = getattr(self.config.production, 'force_alert_on_missing', False)
+
+        past_morning_phase = False
+        if self.time_manager:
+            current_time = now.time()
+            morning_end = self.time_manager.morning_end
+            past_morning_phase = current_time > morning_end
+
+        should_alert = (total_morning > realtime_count) or (force_alert_on_no_attendance and total_morning == 0 and past_morning_phase)
+
+        if should_alert:
             # Nếu chưa phát hiện lần đầu, lưu thời điểm phát hiện
             if self.missing_detected_at is None:
                 self.missing_detected_at = now

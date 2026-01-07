@@ -194,24 +194,30 @@ def calculate_total_morning_from_events(cursor: sqlite3.Cursor, target_date: str
         start_hour, start_min = map(int, morning_start.split(':'))
         end_hour, end_min = map(int, morning_end.split(':'))
         
+        # Handle timestamp with timezone format (e.g., '2026-01-07T09:31:01+07:00')
+        # Use substr() to parse date and time from ISO 8601 format
+        start_minutes = start_hour * 60 + start_min
+        end_minutes = end_hour * 60 + end_min
         cursor.execute("""
             SELECT direction, COUNT(*) as count
-            FROM people_events
-            WHERE date(event_time) = ?
-              AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) >= ?
-              AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) < ?
+            FROM events
+            WHERE substr(timestamp, 1, 10) = ?
+              AND CAST(substr(timestamp, 12, 2) AS INTEGER) * 60 + CAST(substr(timestamp, 15, 2) AS INTEGER) >= ?
+              AND CAST(substr(timestamp, 12, 2) AS INTEGER) * 60 + CAST(substr(timestamp, 15, 2) AS INTEGER) < ?
             GROUP BY direction
-        """, (target_date, start_hour * 60 + start_min, end_hour * 60 + end_min))
+        """, (target_date, start_minutes, end_minutes))
         
         results = cursor.fetchall()
         in_count = 0
         out_count = 0
         
+        # Handle both uppercase (IN/OUT) and lowercase (in/out) directions
         for direction, count in results:
-            if direction == 'IN':
-                in_count = count
-            elif direction == 'OUT':
-                out_count = count
+            dir_upper = direction.upper()
+            if dir_upper == 'IN':
+                in_count += count
+            elif dir_upper == 'OUT':
+                out_count += count
         
         return in_count - out_count
     except Exception as e:
@@ -368,17 +374,26 @@ def export_daily_excel(target_date: Optional[str] = None, db_path: str = "data/p
         events = get_events_for_date(cursor, target_date)
         
         # Calculate total_morning from morning phase events if not in daily_state
-        # Default morning phase: 07:00-08:40 (can be overridden via config)
-        morning_start = "07:00"
-        morning_end = "08:40"
+        # Use hardcoded values (11:05-11:14) - matching main.py TimeManager
+        morning_start = "11:05"
+        morning_end = "11:14"
         
-        # Try to get from config if available (read from env or use defaults)
-        import os
-        morning_start_env = os.getenv("PRODUCTION__MORNING_START", morning_start)
-        morning_end_env = os.getenv("PRODUCTION__MORNING_END", morning_end)
-        if morning_start_env and morning_end_env:
-            morning_start = morning_start_env
-            morning_end = morning_end_env
+        # Try to get from config if available (but use hardcoded as fallback)
+        try:
+            import sys
+            import importlib
+            # Clear config cache
+            if 'app.config' in sys.modules:
+                importlib.reload(sys.modules['app.config'])
+            from app.config import load_config
+            config = load_config()
+            # Only use config if values are not the old defaults
+            if config.production.morning_start != "16:27" and config.production.morning_end != "16:33":
+                morning_start = config.production.morning_start
+                morning_end = config.production.morning_end
+            print(f"Debug - Using morning times: {morning_start}-{morning_end}")
+        except Exception as e:
+            print(f"Debug - Using defaults: {morning_start}-{morning_end} ({e})")
         if not events and has_old_events:
             # Try old schema
             cursor.execute("""
@@ -410,9 +425,11 @@ def export_daily_excel(target_date: Optional[str] = None, db_path: str = "data/p
             total_morning = daily_state.get('total_morning', 0) or 0
             # If total_morning is 0 or None, calculate from morning phase events
             if total_morning == 0 or total_morning is None:
-                total_morning = calculate_total_morning_from_events(cursor, target_date, morning_start, morning_end)
-                if total_morning > 0:
-                    print(f"Debug - Calculated total_morning from events: {total_morning}")
+                calculated = calculate_total_morning_from_events(cursor, target_date, morning_start, morning_end)
+                print(f"Debug - Calculated total_morning from events: {calculated} (morning_start={morning_start}, morning_end={morning_end})")
+                if calculated > 0:
+                    total_morning = calculated
+                    print(f"Debug - Updated total_morning to: {total_morning}")
             realtime_in = daily_state.get('realtime_in', 0) or 0
             realtime_out = daily_state.get('realtime_out', 0) or 0
             # If no events, use realtime counts from state

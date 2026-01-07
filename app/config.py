@@ -305,7 +305,7 @@ class NotificationConfig(BaseSettings):
     """Notification configuration."""
     
     enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable notifications"
     )
     channel: Literal["telegram", "email", "webhook"] = Field(
@@ -373,16 +373,20 @@ class ProductionConfig(BaseSettings):
         description="Daily reset time (HH:MM)"
     )
     morning_start: str = Field(
-        default="16:27",
+        default="11:05",
         description="Morning count phase start (HH:MM)"
     )
     morning_end: str = Field(
-        default="16:33",
+        default="11:14",
         description="Morning count phase end (HH:MM)"
     )
     alert_interval_min: int = Field(
         default=1,
         description="Alert check interval in minutes"
+    )
+    force_alert_on_missing: bool = Field(
+        default=True,
+        description="Force alert even when total_morning is 0 (useful for detecting if no one showed up)"
     )
 
 

@@ -56,6 +56,10 @@ class ExcelExportScheduler:
             output_file = self.daily_dir / f"people_counter_{today}.xlsx"
             logger.info("Running immediate export on startup...")
             self._export_daily_excel(today, output_file)
+            
+            # Also export rolling summary on startup
+            self._export_rolling_summary()
+            
             self._last_export_time = datetime.now()
             logger.info("Immediate export completed")
         except Exception as e:
@@ -94,8 +98,8 @@ class ExcelExportScheduler:
                         # Export yesterday's final file
                         self._export_daily_excel(yesterday, yesterday_file)
                     
-                    # Run aggregated export for last 5 days
-                    self._export_last_5_days()
+                    # Run rolling summary export (replaces old aggregated export)
+                    self._export_rolling_summary()
                     
                     # Run cleanup
                     self._cleanup_old_files()
@@ -118,6 +122,10 @@ class ExcelExportScheduler:
                     today = date.today().strftime('%Y-%m-%d')
                     output_file = self.daily_dir / f"people_counter_{today}.xlsx"
                     self._export_daily_excel(today, output_file)
+                    
+                    # Export rolling summary (last 5 days)
+                    self._export_rolling_summary()
+                    
                     self._last_export_time = now
                 
                 # Sleep for 1 minute before next check
@@ -131,44 +139,42 @@ class ExcelExportScheduler:
     
     def _export_daily_excel(self, target_date: str, output_file: Path) -> bool:
         """
-        Export daily Excel report (internal method).
-        Uses the full export_daily_excel function from export module.
+        Export daily Excel report using new database-driven exporter.
         
         Args:
             target_date: Target date in YYYY-MM-DD format
-            output_file: Output Excel file path
+            output_file: Output Excel file path (unused, kept for compatibility)
         
         Returns:
             True if successful, False otherwise
         """
-        logger.info(f"EXCEL_EXPORT_STARTED: date={target_date}, file={output_file.name}")
-        
-        # Use the full export function from export module
         try:
-            from export.export_daily_excel import export_daily_excel
-            result = export_daily_excel(target_date=target_date, db_path=self.db_path)
+            # Get morning times from config
+            morning_start = "11:05"
+            morning_end = "11:14"
             
-            if result:
-                # Count rows in exported file for logging
-                try:
-                    import pandas as pd
-                    excel_file = Path("exports") / "daily" / f"people_counter_{target_date}.xlsx"
-                    if excel_file.exists():
-                        xls = pd.ExcelFile(excel_file)
-                        row_counts = {}
-                        for sheet_name in xls.sheet_names:
-                            df = pd.read_excel(xls, sheet_name=sheet_name)
-                            row_counts[sheet_name] = len(df)
-                        logger.info(f"EXCEL_EXPORT_COMPLETED: date={target_date}, row_counts={row_counts}")
-                    else:
-                        logger.warning(f"EXCEL_EXPORT_COMPLETED: File not found at expected path")
-                except Exception as e:
-                    logger.warning(f"Could not count rows in Excel file: {e}")
-                
-                return True
-            else:
-                logger.error(f"EXCEL_EXPORT_FAILED: date={target_date}")
-                return False
+            try:
+                from app.config import load_config
+                config = load_config()
+                morning_start = config.production.morning_start
+                morning_end = config.production.morning_end
+                logger.debug(f"Using config morning times: {morning_start}-{morning_end}")
+            except Exception as e:
+                logger.warning(f"Could not load config, using defaults: {morning_start}-{morning_end} ({e})")
+            
+            # Use new database-driven exporter
+            from export.excel_exporter import export_daily_excel
+            
+            result = export_daily_excel(
+                target_date=target_date,
+                db_path=self.db_path,
+                output_dir=str(self.daily_dir),
+                morning_start=morning_start,
+                morning_end=morning_end
+            )
+            
+            return result
+            
         except Exception as e:
             logger.error(f"EXCEL_EXPORT_ERROR: {e}", exc_info=True)
             return False
@@ -435,20 +441,24 @@ class ExcelExportScheduler:
         except:
             return iso_time
     
-    def _export_last_5_days(self):
-        """Export aggregated Excel report for last 5 days."""
+    def _export_rolling_summary(self):
+        """Export rolling summary Excel file (last 5 days)."""
         try:
-            from export.export_last_5_days_excel import export_last_5_days_excel
-            result = export_last_5_days_excel(
+            from export.rolling_summary_exporter import export_rolling_summary
+            
+            result = export_rolling_summary(
                 daily_dir=str(self.daily_dir),
-                output_file=str(self.summary_dir / "people_counter_last_5_days.xlsx")
+                summary_dir=str(self.summary_dir),
+                max_days=5
             )
+            
             if result:
-                logger.info("Aggregated export (last 5 days) completed successfully")
+                logger.info("Rolling summary export completed successfully")
             else:
-                logger.warning("Aggregated export (last 5 days) failed or skipped")
+                logger.warning("Rolling summary export failed or skipped")
+                
         except Exception as e:
-            logger.error(f"Error during aggregated export: {e}", exc_info=True)
+            logger.error(f"Error during rolling summary export: {e}", exc_info=True)
     
     def _cleanup_old_files(self):
         """Delete daily Excel files older than 5 days."""

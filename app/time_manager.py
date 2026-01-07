@@ -24,8 +24,8 @@ class TimeManager:
         self,
         timezone: str = "Asia/Bangkok",
         reset_time: str = "00:00",
-        morning_start: str = "16:27",
-        morning_end: str = "16:33",
+        morning_start: str = "11:05",
+        morning_end: str = "11:14",
     ):
         """
         Initialize time manager.

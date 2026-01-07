@@ -702,24 +702,30 @@ class Storage:
             end_hour, end_min = map(int, morning_end.split(':'))
             
             # Query events in morning phase
+            # Handle timestamp with timezone format (e.g., '2026-01-07T09:31:01+07:00')
+            # Use substr() to parse date and time from ISO 8601 format
+            start_minutes = start_hour * 60 + start_min
+            end_minutes = end_hour * 60 + end_min
             cursor.execute("""
                 SELECT direction, COUNT(*) as count
-                FROM people_events
-                WHERE date(event_time) = ?
-                  AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) >= ?
-                  AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) < ?
+                FROM events
+                WHERE substr(timestamp, 1, 10) = ?
+                  AND CAST(substr(timestamp, 12, 2) AS INTEGER) * 60 + CAST(substr(timestamp, 15, 2) AS INTEGER) >= ?
+                  AND CAST(substr(timestamp, 12, 2) AS INTEGER) * 60 + CAST(substr(timestamp, 15, 2) AS INTEGER) < ?
                 GROUP BY direction
-            """, (date, start_hour * 60 + start_min, end_hour * 60 + end_min))
+            """, (date, start_minutes, end_minutes))
             
             results = cursor.fetchall()
             in_count = 0
             out_count = 0
             
+            # Handle both uppercase (IN/OUT) and lowercase (in/out) directions
             for direction, count in results:
-                if direction == 'IN':
-                    in_count = count
-                elif direction == 'OUT':
-                    out_count = count
+                dir_upper = direction.upper()
+                if dir_upper == 'IN':
+                    in_count += count
+                elif dir_upper == 'OUT':
+                    out_count += count
             
             total_morning = in_count - out_count
             logger.debug(f"Calculated total_morning from events: {total_morning} (IN: {in_count}, OUT: {out_count})")
