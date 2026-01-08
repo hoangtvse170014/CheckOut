@@ -117,15 +117,15 @@ class CameraStream:
             if not self.connect():
                 return False, None
         
-        # FPS capping (disabled if fps_cap = 0 for continuous scanning)
-        if self.fps_cap > 0:
-            current_time = time.time()
-            min_interval = 1.0 / self.fps_cap
-            if current_time - self.last_frame_time < min_interval:
-                # Skip frame but still read to avoid buffer buildup
-                _ = self.cap.read()
-                return False, None
-            self.last_frame_time = current_time
+        # FPS capping - DISABLED for maximum performance (fps_cap should be 0)
+        # Removed FPS cap check to allow maximum camera FPS
+        # if self.fps_cap > 0:
+        #     current_time = time.time()
+        #     min_interval = 1.0 / self.fps_cap
+        #     if current_time - self.last_frame_time < min_interval:
+        #         _ = self.cap.read()
+        #         return False, None
+        #     self.last_frame_time = current_time
         
         try:
             ret, frame = self.cap.read()

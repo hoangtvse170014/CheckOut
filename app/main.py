@@ -4,6 +4,8 @@ import logging
 import signal
 import sys
 import time
+import queue
+import threading
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -22,9 +24,10 @@ from app.notifier import Notifier
 from app.time_manager import TimeManager
 from app.morning_total_manager import MorningTotalManager
 from app.alert_manager import AlertManager
+from app.phase_manager import PhaseManager
 from storage.postgres_writer import PostgresWriter
 from scheduler.excel_export_scheduler import ExcelExportScheduler
-from app.web_server import WebServer
+# from app.web_server import WebServer  # Commented out - file deleted
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,7 @@ class PeopleCounterApp:
         self.notifier = None
         self.time_manager = None
         self.morning_total_manager = None
+        self.phase_manager = None
         self.alert_manager = None
         self.postgres_writer = None
         self.excel_export_scheduler = None
@@ -241,8 +245,10 @@ class PeopleCounterApp:
         self.time_manager = TimeManager(
             timezone=self.config.window.timezone,
             reset_time=self.config.production.reset_time,
-            morning_start="11:05",
-            morning_end="11:14",
+            morning_start=self.config.production.morning_start,
+            morning_end=self.config.production.morning_end,
+            realtime_morning_end=self.config.production.realtime_morning_end,
+            lunch_end=self.config.production.lunch_end,
         )
         
         # Morning Total Manager
@@ -253,22 +259,30 @@ class PeopleCounterApp:
             morning_end=self.config.production.morning_end,
         )
         
+        # Phase Manager (tracks missing periods)
+        self.phase_manager = PhaseManager(
+            storage=self.storage,
+            time_manager=self.time_manager,
+            camera_id=self.config.camera.camera_id,
+            timezone=self.config.window.timezone,
+        )
+        
         # Alert Manager
         self.alert_manager = AlertManager(
             config=self.config,
             storage=self.storage,
             notifier=self.notifier,
             time_manager=self.time_manager,
-            morning_total_manager=self.morning_total_manager,
+            phase_manager=self.phase_manager,
             camera_id=self.config.camera.camera_id,
             timezone=self.config.window.timezone,
-            alert_interval_min=self.config.production.alert_interval_min,
         )
         
         # Setup callbacks
         self.time_manager.on_reset = self._on_daily_reset
         self.time_manager.on_morning_start = self._on_morning_start
         self.time_manager.on_morning_end = self._on_morning_end
+        self.time_manager.on_day_close = self._on_day_close
         
         # Excel Export Scheduler (use same database path as app)
         self.excel_export_scheduler = ExcelExportScheduler(
@@ -276,18 +290,79 @@ class PeopleCounterApp:
             exports_dir="exports"
         )
         
-        # Web Server for LAN access
-        self.web_server = WebServer(
-            app_instance=self,
-            host='0.0.0.0',
-            port=5000
-        )
+        # Web Server for LAN access (port 5001 - FastAPI uses 5000)
+        # Commented out - web_server.py was deleted
+        # self.web_server = WebServer(
+        #     app_instance=self,
+        #     host='0.0.0.0',
+        #     port=5001
+        # )
+        self.web_server = None  # Disabled for now
         
         logger.info("All components initialized")
+        
+        # Background I/O queue for non-blocking database writes and snapshots
+        # REDUCED: Smaller queue size to prevent memory buildup (10 items max = ~10MB max if all are snapshots)
+        self._io_queue = queue.Queue(maxsize=10)  # Reduced from 100 to prevent memory issues
+        self._io_thread = None
+        self._io_thread_running = False
+        
+        # FPS optimization: Cache phase check to avoid calling time_manager.get_current_phase() every frame
+        self._cached_phase = None
+        self._cached_phase_time = 0
+        self._phase_cache_interval = 1.0  # Check phase every 1 second instead of every frame
+        self._cached_datetime = None  # Cache datetime.now() to avoid calling every frame
+        self._datetime_cache_interval = 0.1  # Update datetime cache every 100ms (10 FPS for display)
     
-    def _draw_overlay(self, frame: np.ndarray, tracks: list = None) -> np.ndarray:
+    def _start_io_worker(self):
+        """Start background thread for I/O operations (database writes, snapshots)."""
+        self._io_thread_running = True
+        self._io_thread = threading.Thread(target=self._io_worker, daemon=True)
+        self._io_thread.start()
+        logger.info("Background I/O worker thread started")
+    
+    def _stop_io_worker(self):
+        """Stop background I/O worker thread."""
+        self._io_thread_running = False
+        if self._io_thread:
+            self._io_thread.join(timeout=5.0)
+            logger.info("Background I/O worker thread stopped")
+    
+    def _io_worker(self):
+        """Background worker thread for I/O operations."""
+        while self._io_thread_running:
+            try:
+                # Get task from queue with timeout
+                task = self._io_queue.get(timeout=0.5)
+                task_type = task.get('type')
+                
+                try:
+                    if task_type == 'save_daily_state':
+                        self.storage.save_daily_state(**task['kwargs'])
+                    elif task_type == 'add_event':
+                        self.storage.add_event(**task['kwargs'])
+                    elif task_type == 'save_snapshot':
+                        # Free frame from memory immediately after writing
+                        frame_data = task['frame']
+                        cv2.imwrite(str(task['path']), frame_data)
+                        del frame_data  # Explicitly free frame memory
+                    elif task_type == 'postgres_event':
+                        if self.postgres_writer:
+                            self.postgres_writer.write_event(**task['kwargs'])
+                except Exception as e:
+                    logger.error(f"Background I/O task failed ({task_type}): {e}", exc_info=True)
+                finally:
+                    self._io_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error in I/O worker: {e}", exc_info=True)
+    
+    def _draw_overlay(self, frame: np.ndarray, tracks: list = None, frame_count: int = 0) -> np.ndarray:
         """Draw overlay on frame with gate visualization."""
-        overlay = frame.copy()
+        # OPTIMIZED: Draw directly on frame (modify in-place) - avoids expensive copy operation
+        # Note: This modifies the original frame, but we're done processing it, and snapshot will have overlay
+        overlay = frame  # No copy - significant FPS improvement
         h, w = overlay.shape[:2]
         
         # Draw gate band
@@ -485,10 +560,25 @@ class PeopleCounterApp:
         
         # Calculate office occupancy
         if self.time_manager:
-            # Kiểm tra phase từ time_manager (dựa trên morning_start và morning_end)
-            current_phase = self.time_manager.get_current_phase()
-            now_dt = datetime.now(self.time_manager.tz)
+            # FPS OPTIMIZATION: Cache phase check - only check every 1 second instead of every frame
+            current_time_float = time.time()
+            if current_time_float - self._cached_phase_time >= self._phase_cache_interval:
+                self._cached_phase = self.time_manager.get_current_phase()
+                self._cached_phase_time = current_time_float
+            
+            # FPS OPTIMIZATION: Cache datetime.now() - only update every 100ms instead of every frame
+            if (self._cached_datetime is None or 
+                current_time_float - self._cached_datetime[0] >= self._datetime_cache_interval):
+                now_dt = datetime.now(self.time_manager.tz)
+                self._cached_datetime = (current_time_float, now_dt)
+            
+            current_phase = self._cached_phase
+            now_dt = self._cached_datetime[1]
             current_time = now_dt.time()
+            
+            # Debug log để kiểm tra phase (throttled)
+            if frame_count % 300 == 0:  # Log every 300 frames (~10s)
+                logger.debug(f"Current phase: {current_phase.value}, time: {current_time.strftime('%H:%M:%S')}, morning={self.time_manager.morning_start.strftime('%H:%M')}-{self.time_manager.morning_end.strftime('%H:%M')}")
             
             if current_phase.value == "MORNING_COUNT":
                 # Morning phase: Chỉ hiển thị total morning, KHÔNG hiển thị realtime
@@ -558,10 +648,16 @@ class PeopleCounterApp:
         return overlay
     
     def _on_daily_reset(self):
-        """Handle daily reset callback."""
+        """Handle daily reset callback at 06:00 (per requirements)."""
+        logger.info("=== DAILY RESET AT 06:00 - Resetting all data and starting TOTAL_MORNING counting ===")
+        
         # Reset morning total manager
         if self.morning_total_manager:
             self.morning_total_manager.reset()
+        
+        # Reset phase manager
+        if self.phase_manager:
+            self.phase_manager.reset()
         
         # Reset alert manager
         if self.alert_manager:
@@ -572,11 +668,53 @@ class PeopleCounterApp:
         self.initial_count_out = 0
         self.realtime_in = 0
         self.realtime_out = 0
+        
+        # Reset daily_state for new day
+        tz = pytz.timezone(self.config.window.timezone)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        self.storage.save_daily_state(
+            date=today,
+            total_morning=0,
+            is_frozen=False,
+            is_missing=False,
+            realtime_in=0,
+            realtime_out=0,
+        )
+        
+        # Close any open missing periods from yesterday
+        try:
+            from datetime import timedelta
+            yesterday = (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+            conn = self.storage._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE missing_periods
+                SET end_time = ?,
+                    duration_minutes = CAST((julianday(?) - julianday(start_time)) * 1440 AS INTEGER)
+                WHERE substr(start_time, 1, 10) = ? AND end_time IS NULL
+            """, (datetime.now(tz).isoformat(), datetime.now(tz).isoformat(), yesterday))
+            conn.commit()
+            conn.close()
+            logger.info(f"Closed any open missing periods from {yesterday}")
+        except Exception as e:
+            logger.warning(f"Could not close missing periods: {e}")
+        
+        logger.info("Daily reset completed. TOTAL_MORNING counting started at 06:00")
     
     def _on_morning_start(self):
         """Handle morning phase start callback."""
-        # Morning phase started, allow counting
-        pass
+        # Morning phase started - reset counters to start counting total morning from 0
+        logger.info("=== MORNING PHASE STARTED - Resetting counters to count Total Morning ===")
+        self.initial_count_in = 0
+        self.initial_count_out = 0
+        
+        # Clear any existing total_morning for today (if app restarted during morning phase)
+        tz = pytz.timezone(self.config.window.timezone)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        self.storage.save_daily_state(date=today, total_morning=0, is_frozen=False)
+        
+        logger.info(f"Counters reset: initial_count_in={self.initial_count_in}, initial_count_out={self.initial_count_out}")
+        logger.info("Ready to count Total Morning from now until morning phase ends")
     
     def _on_morning_end(self):
         """Handle morning phase end callback."""
@@ -601,6 +739,39 @@ class PeopleCounterApp:
         # Freeze morning total manager (nếu có)
         if self.morning_total_manager:
             self.morning_total_manager.freeze()
+        
+        logger.info("=== TOTAL_MORNING LOCKED at 08:30 - Value will not change anymore ===")
+    
+    def _on_day_close(self):
+        """Handle day close at 23:59 - prepare for next day."""
+        logger.info("=== DAY CLOSE AT 23:59 - Finalizing today's data ===")
+        tz = pytz.timezone(self.config.window.timezone)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        # Ensure all data is persisted
+        try:
+            # Final save of daily state
+            state = self.storage.get_daily_state(today)
+            if state:
+                logger.info(f"Final daily state for {today}: total_morning={state.get('total_morning', 0)}, "
+                          f"realtime_in={state.get('realtime_in', 0)}, realtime_out={state.get('realtime_out', 0)}")
+            
+            # Close any open missing periods
+            conn = self.storage._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE missing_periods
+                SET end_time = ?,
+                    duration_minutes = CAST((julianday(?) - julianday(start_time)) * 1440 AS INTEGER)
+                WHERE substr(start_time, 1, 10) = ? AND end_time IS NULL
+            """, (datetime.now(tz).isoformat(), datetime.now(tz).isoformat(), today))
+            conn.commit()
+            conn.close()
+            logger.info(f"Closed any open missing periods for {today}")
+        except Exception as e:
+            logger.warning(f"Error during day close: {e}")
+        
+        logger.info("Day close completed. System ready for reset at 06:00 tomorrow.")
     
     def run(self):
         """Run main loop."""
@@ -612,17 +783,29 @@ class PeopleCounterApp:
         # Connect camera
         if not self.camera.connect():
             logger.error("Failed to connect to camera, exiting")
+            # Show error window anyway
+            error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(error_frame, "Camera connection failed!", (50, 200), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(error_frame, "Check camera connection", (50, 250), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(error_frame, "Press 'q' to exit", (50, 300), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.imshow("People Counter", error_frame)
+            logger.info("Showing error window - press 'q' to exit")
+            while True:
+                if cv2.waitKey(100) & 0xFF == ord('q'):
+                    break
             return
         
         # Start schedulers
         self.scheduler.start()
         self.time_manager.start()
+        self.phase_manager.start()
         self.alert_manager.start()
         self.excel_export_scheduler.start()
         
         # Start web server
-        if self.web_server:
-            self.web_server.start()
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -630,6 +813,13 @@ class PeopleCounterApp:
         
         self.running = True
         logger.info("Main loop started")
+        
+        # Create OpenCV window before main loop
+        # Use WINDOW_AUTOSIZE for better compatibility on Windows
+        cv2.namedWindow("People Counter", cv2.WINDOW_AUTOSIZE)
+        cv2.setWindowProperty("People Counter", cv2.WND_PROP_TOPMOST, 1)  # Make window topmost
+        cv2.moveWindow("People Counter", 100, 100)  # Position window
+        logger.info("OpenCV window created at position (100, 100)")
         
         # DIAGNOSTIC: Force test insert to verify database writes work
         try:
@@ -659,34 +849,48 @@ class PeopleCounterApp:
         today = datetime.now(tz).strftime("%Y-%m-%d")
         state = self.storage.get_daily_state(today)
         
-        if state:
-            # Load from state
+        # Check if we're currently in morning phase
+        current_phase = self.time_manager.get_current_phase() if self.time_manager else None
+        is_in_morning_phase = (current_phase and current_phase.value == "MORNING_COUNT")
+        
+        # Initialize phase cache for FPS optimization
+        if self.time_manager:
+            self._cached_phase = current_phase
+            self._cached_phase_time = time.time()
+            # Initialize datetime cache
+            now_dt = datetime.now(self.time_manager.tz)
+            self._cached_datetime = (time.time(), now_dt)
+        
+        if is_in_morning_phase:
+            # If in morning phase, reset counters to start counting from 0
+            logger.info("=== App started during MORNING PHASE - Resetting counters to count Total Morning ===")
+            self.initial_count_in = 0
+            self.initial_count_out = 0
+            self.realtime_in = state.get('realtime_in', 0) if state else 0
+            self.realtime_out = state.get('realtime_out', 0) if state else 0
+            # Clear total_morning to start fresh
+            self.storage.save_daily_state(date=today, total_morning=0, is_frozen=False)
+            logger.info(f"Counters reset for morning phase: initial IN={self.initial_count_in}, OUT={self.initial_count_out}")
+        elif state:
+            # Load from state (we're past morning phase or before it)
             self.realtime_in = state.get('realtime_in', 0)
             self.realtime_out = state.get('realtime_out', 0)
             
-            # Calculate initial_count_in/out from total_morning and events
-            total_morning = state.get('total_morning', 0)
-            if total_morning is None or total_morning == 0:
-                # Calculate from morning phase events
-                morning_start = self.time_manager.morning_start.strftime('%H:%M')
-                morning_end = self.time_manager.morning_end.strftime('%H:%M')
-                total_morning = self.storage.get_total_morning_from_events(today, morning_start, morning_end)
-            
-            # Estimate initial counts from total_morning (we don't store them separately)
-            # We'll recalculate from morning phase events
+            # Calculate initial_count_in/out from morning phase events
             morning_start = self.time_manager.morning_start.strftime('%H:%M')
             morning_end = self.time_manager.morning_end.strftime('%H:%M')
             conn = self.storage._get_connection()
             cursor = conn.cursor()
             start_hour, start_min = map(int, morning_start.split(':'))
             end_hour, end_min = map(int, morning_end.split(':'))
+            # Use events table and handle ISO timestamp format
             cursor.execute("""
-                SELECT direction, COUNT(*) as count
-                FROM people_events
-                WHERE date(event_time) = ?
-                  AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) >= ?
-                  AND CAST(strftime('%H', event_time) AS INTEGER) * 60 + CAST(strftime('%M', event_time) AS INTEGER) < ?
-                GROUP BY direction
+                SELECT UPPER(direction) as direction, COUNT(*) as count
+                FROM events
+                WHERE substr(timestamp, 1, 10) = ?
+                  AND CAST(substr(timestamp, 12, 2) AS INTEGER) * 60 + CAST(substr(timestamp, 15, 2) AS INTEGER) >= ?
+                  AND CAST(substr(timestamp, 12, 2) AS INTEGER) * 60 + CAST(substr(timestamp, 15, 2) AS INTEGER) < ?
+                GROUP BY UPPER(direction)
             """, (today, start_hour * 60 + start_min, end_hour * 60 + end_min))
             results = cursor.fetchall()
             self.initial_count_in = 0
@@ -698,8 +902,10 @@ class PeopleCounterApp:
                     self.initial_count_out = count
             conn.close()
             
+            total_morning = state.get('total_morning', 0)
             logger.info(f"Synced counters from database: initial IN={self.initial_count_in}, OUT={self.initial_count_out}, realtime IN={self.realtime_in}, OUT={self.realtime_out}, total_morning={total_morning}")
         else:
+            # No existing state, start with zero counters
             self.initial_count_in = 0
             self.initial_count_out = 0
             self.realtime_in = 0
@@ -717,58 +923,51 @@ class PeopleCounterApp:
         self_test_inserted = False
         self_test_check_time = time.time()
         
+        # Simple logging timer
+        
+        logger.info("Entering main loop - waiting for camera frames...")
+        
+        # Show a test frame first to ensure window is visible
+        test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(test_frame, "Initializing camera...", (150, 220), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        try:
+            cv2.imshow("People Counter", test_frame)
+            cv2.waitKey(100)  # Force window to display
+            cv2.setWindowProperty("People Counter", cv2.WND_PROP_TOPMOST, 0)  # Remove topmost after showing
+            logger.info("Test frame displayed - window should be visible now")
+        except Exception as e:
+            logger.error(f"Error showing test frame: {e}", exc_info=True)
+        
         try:
             while self.running:
-                # Profile total loop time
-                loop_start = time.time()
-                
                 # Read frame
-                read_start = time.time()
                 success, frame = self.camera.read()
-                read_time = time.time() - read_start
                 if not success or frame is None:
+                    if frame_count == 0:
+                        logger.warning("Camera not returning frames - check camera connection")
+                        # Show error frame instead of blank screen
+                        error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        cv2.putText(error_frame, "Waiting for camera frames...", (100, 220), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+                        cv2.imshow("People Counter", error_frame)
+                        if cv2.waitKey(100) & 0xFF == ord('q'):
+                            break
                     continue
+                
+                # Log first successful frame read
+                if frame_count == 0:
+                    logger.info(f"First frame received! Frame shape: {frame.shape}")
                 
                 frame_count += 1
                 
-                # Resize frame if max_resolution is set (for high-res cameras - faster detection)
-                original_frame = frame
-                frame_scale = 1.0
-                if self.config.camera.max_resolution is not None:
-                    h, w = frame.shape[:2]
-                    max_dim = max(h, w)
-                    if max_dim > self.config.camera.max_resolution:
-                        scale = self.config.camera.max_resolution / max_dim
-                        new_w = int(w * scale)
-                        new_h = int(h * scale)
-                        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                        frame_scale = scale
-                
-                # Detect and track using YOLO's built-in tracker (simpler and more reliable)
+                # Detect and track using YOLO's built-in tracker
                 try:
-                    detect_start = time.time()
                     tracks = self.detector.detect_and_track(frame, persist=True)
-                    detect_time = time.time() - detect_start
-                    # Scale coordinates back to original resolution if frame was resized
-                    if frame_scale != 1.0:
-                        tracks = [
-                            (tid, x1/frame_scale, y1/frame_scale, x2/frame_scale, y2/frame_scale, conf)
-                            for tid, x1, y1, x2, y2, conf in tracks
-                        ]
-                        frame = original_frame  # Use original frame for overlay
-                    
-                        
                 except Exception as e:
                     logger.warning(f"Detect and track failed, falling back to separate detect+track: {e}", exc_info=True)
                     # Fallback to separate detect + track
                     detections = self.detector.detect(frame)
-                    # Scale coordinates back to original resolution if frame was resized
-                    if frame_scale != 1.0:
-                        detections = [
-                            (x1/frame_scale, y1/frame_scale, x2/frame_scale, y2/frame_scale, conf)
-                            for x1, y1, x2, y2, conf in detections
-                        ]
-                        frame = original_frame  # Use original frame for tracking
                     tracks = self.tracker.update(detections, frame)
                     
                     # Debug: log if no tracks detected
@@ -779,7 +978,6 @@ class PeopleCounterApp:
                             logger.debug(f"{len(detections)} detections but no tracks in frame {frame_count}")
                 
                 # Update gate counter with bottom-center points
-                # IMPORTANT: Update counter for EVERY track EVERY frame
                 current_ts = time.time()
                 elapsed_time = current_ts - self.start_time
                 is_initial_phase = elapsed_time < self.initial_phase_duration
@@ -787,7 +985,7 @@ class PeopleCounterApp:
                 for track_id, x1, y1, x2, y2, conf in tracks:
                     # Use bottom-center of bounding box as tracking point
                     bottom_center = ((x1 + x2) / 2, y2)
-                    # Update counter (tracks position every frame, counts when entering gate)
+                    # Update counter
                     event = self.gate_counter.update(track_id, bottom_center, current_ts)
                     
                     if event:
@@ -805,68 +1003,133 @@ class PeopleCounterApp:
                             if event.direction == "IN":
                                 self.initial_count_in += 1
                                 total = self.initial_count_in - self.initial_count_out
-                                logger.info(f"Morning phase: Person entered. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                                # OPTIMIZED: Throttle logging (only log every 10th event or important ones)
+                                if self.initial_count_in % 10 == 1:
+                                    logger.info(f"Morning phase: Person entered. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
                             elif event.direction == "OUT":
                                 self.initial_count_out += 1
                                 total = self.initial_count_in - self.initial_count_out
-                                logger.info(f"Morning phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                                # OPTIMIZED: Throttle logging
+                                if self.initial_count_out % 10 == 1:
+                                    logger.info(f"Morning phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
                             
                             # Lưu total_morning ngay khi có events (để alert_manager có thể check)
+                            # OPTIMIZED: Use background queue instead of blocking write
                             tz = pytz.timezone(self.config.window.timezone)
                             today = datetime.now(tz).strftime("%Y-%m-%d")
                             total_morning = self.initial_count_in - self.initial_count_out
-                            self.storage.save_daily_state(date=today, total_morning=total_morning)
+                            # Save daily state (queue for background, fallback to direct write)
+                            try:
+                                self._io_queue.put_nowait({
+                                    'type': 'save_daily_state',
+                                    'kwargs': {'date': today, 'total_morning': total_morning}
+                                })
+                            except queue.Full:
+                                logger.warning("I/O queue full, writing daily state directly")
+                                self.storage.save_daily_state(date=today, total_morning=total_morning)
                         else:
                             # Realtime monitoring phase: Đếm vào realtime_in/out
                             if event.direction == "IN":
                                 self.realtime_in += 1
                                 initial_total = self.initial_count_in - self.initial_count_out
                                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
-                                logger.info(f"Realtime: Person entered. Realtime IN: {self.realtime_in}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
+                                # OPTIMIZED: Throttle logging
+                                if self.realtime_in % 10 == 1:
+                                    logger.info(f"Realtime: Person entered. Realtime IN: {self.realtime_in}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
                                 
                                 # Lưu realtime_in vào state để alert_manager sử dụng
+                                # OPTIMIZED: Use background queue instead of blocking write
                                 tz = pytz.timezone(self.config.window.timezone)
                                 today = datetime.now(tz).strftime("%Y-%m-%d")
-                                self.storage.save_daily_state(date=today, realtime_in=self.realtime_in)
+                                # Save realtime counters (queue for background, fallback to direct write)
+                                try:
+                                    self._io_queue.put_nowait({
+                                        'type': 'save_daily_state',
+                                        'kwargs': {'date': today, 'realtime_in': self.realtime_in}
+                                    })
+                                except queue.Full:
+                                    logger.warning("I/O queue full, writing realtime counters directly")
+                                    self.storage.save_daily_state(date=today, realtime_in=self.realtime_in)
                                 
                             elif event.direction == "OUT":
                                 self.realtime_out += 1
                                 initial_total = self.initial_count_in - self.initial_count_out
                                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
-                                logger.info(f"Realtime: Person exited. Realtime OUT: {self.realtime_out}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
+                                # OPTIMIZED: Throttle logging
+                                if self.realtime_out % 10 == 1:
+                                    logger.info(f"Realtime: Person exited. Realtime OUT: {self.realtime_out}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
                                 
                                 # Lưu realtime_out vào state để alert_manager sử dụng
+                                # OPTIMIZED: Use background queue instead of blocking write
                                 tz = pytz.timezone(self.config.window.timezone)
                                 today = datetime.now(tz).strftime("%Y-%m-%d")
-                                self.storage.save_daily_state(date=today, realtime_out=self.realtime_out)
+                                # Save realtime counters (queue for background, fallback to direct write)
+                                try:
+                                    self._io_queue.put_nowait({
+                                        'type': 'save_daily_state',
+                                        'kwargs': {'date': today, 'realtime_out': self.realtime_out}
+                                    })
+                                except queue.Full:
+                                    logger.warning("I/O queue full, writing realtime counters directly")
+                                    self.storage.save_daily_state(date=today, realtime_out=self.realtime_out)
                         
-                        # Save event to database
+                        # OPTIMIZED: Save event to database via background queue (non-blocking)
                         # SQLite (always save for compatibility with existing code)
-                        event_id = self.storage.add_event(
-                            track_id=track_id,
-                            direction=event.direction.lower(),
-                            camera_id=self.config.camera.camera_id,
-                        )
-                        if event_id:
-                            logger.info(f"Event saved to database: id={event_id}, direction={event.direction}, track_id={track_id}")
-                        else:
-                            logger.error(f"FAILED to save event to database: direction={event.direction}, track_id={track_id}")
+                        # CRITICAL: Event must be written - try queue first, fallback to direct write
+                        try:
+                            self._io_queue.put_nowait({
+                                'type': 'add_event',
+                                'kwargs': {
+                                    'track_id': track_id,
+                                    'direction': event.direction.lower(),
+                                    'camera_id': self.config.camera.camera_id,
+                                }
+                            })
+                        except queue.Full:
+                            # Queue full - write directly to ensure no data loss (CRITICAL)
+                            logger.warning("I/O queue full, writing event directly to database to prevent data loss")
+                            try:
+                                self.storage.add_event(
+                                    track_id=track_id,
+                                    direction=event.direction.lower(),
+                                    camera_id=self.config.camera.camera_id,
+                                )
+                            except Exception as e:
+                                logger.error(f"CRITICAL: Direct event write failed: {e}", exc_info=True)
                         
                         # PostgreSQL (if enabled, non-blocking)
                         if self.postgres_writer:
-                            # Convert Unix timestamp to datetime
-                            event_time = datetime.fromtimestamp(event.timestamp)
-                            self.postgres_writer.write_event(
-                                event_time=event_time,
-                                direction=event.direction,
-                                camera_id=self.config.camera.camera_id,
-                            )
+                            try:
+                                event_time = datetime.fromtimestamp(event.timestamp)
+                                self._io_queue.put_nowait({
+                                    'type': 'postgres_event',
+                                    'kwargs': {
+                                        'event_time': event_time,
+                                        'direction': event.direction,
+                                        'camera_id': self.config.camera.camera_id,
+                                    }
+                                })
+                            except queue.Full:
+                                pass  # Non-critical
                         
-                        # Save snapshot if enabled
+                        
+                        # OPTIMIZED: Save snapshot via background queue (non-blocking)
+                        # MEMORY FIX: Only save snapshot if queue has space (prevents RAM buildup)
                         if self.config.save_snapshots:
-                            timestamp = time.strftime("%Y%m%d_%H%M%S")
-                            snapshot_path = Path(self.config.snapshot_dir) / f"gate_{track_id}_{event.direction}_{timestamp}.jpg"
-                            cv2.imwrite(str(snapshot_path), frame)
+                            # Only try to save if queue is not full (avoid memory buildup)
+                            if self._io_queue.qsize() < self._io_queue.maxsize * 0.7:  # Only if < 70% full
+                                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                                snapshot_path = Path(self.config.snapshot_dir) / f"gate_{track_id}_{event.direction}_{timestamp}.jpg"
+                                try:
+                                    # Make a copy of frame for snapshot (background thread will write it)
+                                    frame_copy = frame.copy()
+                                    self._io_queue.put_nowait({
+                                        'type': 'save_snapshot',
+                                        'path': snapshot_path,
+                                        'frame': frame_copy
+                                    })
+                                except queue.Full:
+                                    pass  # Silently skip if queue is full
                 
                 # Self-test insert: If no events exist after 60 seconds, insert a test event
                 current_time = time.time()
@@ -898,29 +1161,29 @@ class PeopleCounterApp:
                     
                     self_test_inserted = True
                 
-                # Log metrics periodically
-                loop_time = current_time - loop_start
-                
-                if current_time - last_log_time >= 5:  # Every 5 seconds for debugging
+                # Log metrics periodically (simplified)
+                current_time = time.time()
+                if current_time - last_log_time >= 5:  # Every 5 seconds
                     counts = self.gate_counter.get_counts()
                     logger.info(
-                        f"Metrics: FPS={self.camera.get_fps():.1f}, "
+                        f"FPS={self.camera.get_fps():.1f}, "
                         f"Frames={frame_count}, IN={counts['in']}, OUT={counts['out']}, "
-                        f"Active tracks={len(tracks)}, "
-                        f"Loop={loop_time*1000:.1f}ms, Read={read_time*1000:.1f}ms, Detect={detect_time*1000:.1f}ms"
+                        f"Active tracks={len(tracks)}"
                     )
                     last_log_time = current_time
                 
-                # Display frame with overlay (include tracks for visualization)
-                # Draw overlay every frame to avoid flickering
-                overlay = self._draw_overlay(frame, tracks)
+                # Draw overlay and display
+                overlay = self._draw_overlay(frame, tracks, frame_count)
                 
-                # Update web server with current frame
-                if self.web_server:
-                    self.web_server.update_frame(overlay)
+                # Display frame
+                try:
+                    cv2.imshow("People Counter", overlay)
+                except Exception as e:
+                    logger.error(f"Error displaying frame: {e}", exc_info=True)
                 
-                cv2.imshow("People Counter", overlay)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    logger.info("User pressed 'q' to quit")
                     break
                 
         except KeyboardInterrupt:
@@ -940,8 +1203,8 @@ class PeopleCounterApp:
         logger.info("Shutting down application...")
         self.running = False
         
-        if self.web_server:
-            self.web_server.stop()
+        # Stop background I/O worker
+        self._stop_io_worker()
         
         # Force final Excel export before shutdown
         if self.excel_export_scheduler:
@@ -961,6 +1224,9 @@ class PeopleCounterApp:
         
         if self.alert_manager:
             self.alert_manager.stop()
+        
+        if self.phase_manager:
+            self.phase_manager.stop()
         
         if self.time_manager:
             self.time_manager.stop()

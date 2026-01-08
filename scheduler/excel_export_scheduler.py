@@ -442,14 +442,14 @@ class ExcelExportScheduler:
             return iso_time
     
     def _export_rolling_summary(self):
-        """Export rolling summary Excel file (last 5 days)."""
+        """Export rolling summary Excel file (last 7 days per requirements)."""
         try:
             from export.rolling_summary_exporter import export_rolling_summary
             
             result = export_rolling_summary(
                 daily_dir=str(self.daily_dir),
                 summary_dir=str(self.summary_dir),
-                max_days=5
+                max_days=7  # Changed from 5 to 7 per requirements
             )
             
             if result:

@@ -163,6 +163,26 @@ class Storage:
                 cursor.execute("ALTER TABLE daily_state ADD COLUMN realtime_out INTEGER DEFAULT 0")
                 logger.info("Added realtime_out column to daily_state table")
             
+            # missing_periods table: track missing periods with session (morning/afternoon)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS missing_periods (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_time DATETIME NOT NULL,
+                    end_time DATETIME,
+                    duration_minutes INTEGER,
+                    session TEXT CHECK(session IN ('morning', 'afternoon')) NOT NULL,
+                    alert_sent INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Update alert_logs to include phase/session information
+            cursor.execute("PRAGMA table_info(alert_logs)")
+            alert_logs_columns = [row[1] for row in cursor.fetchall()]
+            if 'phase' not in alert_logs_columns:
+                cursor.execute("ALTER TABLE alert_logs ADD COLUMN phase TEXT")
+                logger.info("Added phase column to alert_logs table")
+            
             # Create indexes for performance
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)
@@ -195,7 +215,7 @@ class Storage:
         Raises:
             RuntimeError: If any required table is missing
         """
-        required_tables = ['events', 'people_events', 'alert_logs', 'daily_summary', 'daily_state']
+        required_tables = ['events', 'people_events', 'alert_logs', 'daily_summary', 'daily_state', 'missing_periods']
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = conn.cursor()
         
@@ -794,6 +814,248 @@ class Storage:
         except Exception as e:
             logger.warning(f"Error calculating realtime_count from events: {e}")
             return 0
+        finally:
+            conn.close()
+    
+    def create_missing_period(
+        self,
+        start_time: datetime,
+        session: str,
+    ) -> int:
+        """
+        Create a new missing period.
+        
+        Args:
+            start_time: Start time of missing period
+            session: 'morning' or 'afternoon'
+        
+        Returns:
+            Missing period ID
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            start_iso = start_time.isoformat()
+            cursor.execute("""
+                INSERT INTO missing_periods (start_time, session, alert_sent)
+                VALUES (?, ?, 0)
+            """, (start_iso, session))
+            
+            period_id = cursor.lastrowid
+            conn.commit()
+            logger.info(f"Missing period created: id={period_id}, session={session}, start={start_iso}")
+            return period_id
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Failed to create missing period: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+    
+    def close_missing_period(
+        self,
+        period_id: int,
+        end_time: datetime,
+    ):
+        """
+        Close a missing period by setting end_time and calculating duration.
+        
+        Args:
+            period_id: Missing period ID
+            end_time: End time of missing period
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Get start_time to calculate duration
+            cursor.execute("SELECT start_time FROM missing_periods WHERE id = ?", (period_id,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"Missing period {period_id} not found")
+                return
+            
+            start_time_str = row['start_time']
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+            if start_time.tzinfo is None:
+                start_time = self.timezone.localize(start_time)
+            
+            duration_minutes = int((end_time - start_time).total_seconds() / 60)
+            end_iso = end_time.isoformat()
+            
+            cursor.execute("""
+                UPDATE missing_periods
+                SET end_time = ?, duration_minutes = ?
+                WHERE id = ?
+            """, (end_iso, duration_minutes, period_id))
+            
+            conn.commit()
+            logger.info(f"Missing period closed: id={period_id}, duration={duration_minutes} minutes")
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Failed to close missing period: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+    
+    def mark_missing_period_alert_sent(
+        self,
+        period_id: int,
+    ):
+        """
+        Mark that an alert has been sent for a missing period.
+        
+        Args:
+            period_id: Missing period ID
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                UPDATE missing_periods
+                SET alert_sent = 1
+                WHERE id = ?
+            """, (period_id,))
+            
+            conn.commit()
+            logger.info(f"Missing period alert marked as sent: id={period_id}")
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Failed to mark alert sent: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+    
+    def get_active_missing_period(
+        self,
+        date: str,
+        session: str,
+    ) -> Optional[dict]:
+        """
+        Get active (open) missing period for a date and session.
+        
+        Args:
+            date: Date string (YYYY-MM-DD)
+            session: 'morning' or 'afternoon'
+        
+        Returns:
+            Dictionary with period data or None
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT id, start_time, end_time, duration_minutes, session, alert_sent
+                FROM missing_periods
+                WHERE substr(start_time, 1, 10) = ? AND session = ? AND end_time IS NULL
+                ORDER BY start_time DESC
+                LIMIT 1
+            """, (date, session))
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row['id'],
+                    'start_time': row['start_time'],
+                    'end_time': row['end_time'],
+                    'duration_minutes': row['duration_minutes'],
+                    'session': row['session'],
+                    'alert_sent': bool(row['alert_sent']),
+                }
+            return None
+        finally:
+            conn.close()
+    
+    def get_last_alert_time(
+        self,
+        date: str,
+        session: str,
+    ) -> Optional[datetime]:
+        """
+        Get the timestamp of the last alert sent for a date and session.
+        
+        Args:
+            date: Date string (YYYY-MM-DD)
+            session: 'morning' or 'afternoon'
+        
+        Returns:
+            Datetime of last alert or None if no alert sent
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT alert_time
+                FROM alert_logs
+                WHERE substr(alert_time, 1, 10) = ?
+                  AND phase = ?
+                  AND notification_status = 'sent'
+                ORDER BY alert_time DESC
+                LIMIT 1
+            """, (date, session))
+            
+            row = cursor.fetchone()
+            if row:
+                alert_time_str = row[0]
+                # Parse ISO format timestamp
+                try:
+                    if 'T' in alert_time_str:
+                        # ISO format: 2026-01-08T09:30:45+07:00
+                        alert_time = datetime.fromisoformat(alert_time_str.replace('Z', '+00:00'))
+                    else:
+                        # Fallback: assume format without timezone
+                        alert_time = datetime.strptime(alert_time_str, '%Y-%m-%d %H:%M:%S')
+                        # Add timezone if not present
+                        import pytz
+                        alert_time = pytz.timezone('Asia/Ho_Chi_Minh').localize(alert_time)
+                    
+                    return alert_time
+                except Exception as e:
+                    logger.error(f"Failed to parse alert_time '{alert_time_str}': {e}")
+                    return None
+            return None
+        finally:
+            conn.close()
+    
+    def get_missing_periods_for_date(
+        self,
+        date: str,
+    ) -> List[dict]:
+        """
+        Get all missing periods for a date.
+        
+        Args:
+            date: Date string (YYYY-MM-DD)
+        
+        Returns:
+            List of missing period dictionaries
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT id, start_time, end_time, duration_minutes, session, alert_sent
+                FROM missing_periods
+                WHERE substr(start_time, 1, 10) = ?
+                ORDER BY start_time ASC
+            """, (date,))
+            
+            periods = []
+            for row in cursor.fetchall():
+                periods.append({
+                    'id': row['id'],
+                    'start_time': row['start_time'],
+                    'end_time': row['end_time'],
+                    'duration_minutes': row['duration_minutes'],
+                    'session': row['session'],
+                    'alert_sent': bool(row['alert_sent']),
+                })
+            return periods
         finally:
             conn.close()
 

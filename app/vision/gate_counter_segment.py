@@ -38,7 +38,7 @@ class GateCounterSegment:
         self,
         gate_p1: Tuple[float, float],
         gate_p2: Tuple[float, float],
-        cooldown_sec: float = 0.8,
+        cooldown_sec: float = 2.0,  # Increased default cooldown to prevent double counting
         min_travel_px: float = 12.0,
         direction_mapping_pos_to_neg: str = "IN",
         direction_mapping_neg_to_pos: str = "OUT",
@@ -237,6 +237,9 @@ class GateCounterSegment:
         # Check cooldown
         if (ts - state.last_count_ts) < self.cooldown_sec:
             # Still in cooldown, update state but don't check crossing
+            cooldown_remaining = self.cooldown_sec - (ts - state.last_count_ts)
+            if track_id % 10 == 0:  # Log every 10th frame to avoid spam
+                logger.debug(f"Track {track_id}: In cooldown ({cooldown_remaining:.2f}s remaining)")
             state.last_point = point
             state.last_ts = ts
             state.last_side = self._get_side(point)
@@ -249,6 +252,8 @@ class GateCounterSegment:
         
         if travel_distance < self.min_travel_px:
             # Not enough movement, update state but don't check crossing
+            if track_id % 30 == 0:  # Log occasionally
+                logger.debug(f"Track {track_id}: Travel distance {travel_distance:.1f}px < min {self.min_travel_px}px")
             state.last_point = point
             state.last_ts = ts
             state.last_side = self._get_side(point)
@@ -270,7 +275,8 @@ class GateCounterSegment:
         # Get current side
         cur_side = self._get_side(point)
         
-        # Log side changes for debugging (INFO level for visibility)
+        # Always check intersection when side changes (for debugging)
+        intersects = False
         if state.last_side != cur_side and state.last_side != 0 and cur_side != 0:
             # Side changed - check if segment intersects gate
             intersects = self._segment_intersect(
@@ -280,13 +286,18 @@ class GateCounterSegment:
                 tuple(self.gate_p2),
             )
             
+            # Log side changes for debugging (INFO level for visibility)
             logger.info(
                 f"Track {track_id}: Side changed ({state.last_side} -> {cur_side}), "
                 f"intersects={intersects}, travel={travel_distance:.1f}px, "
-                f"last_point={state.last_point}, cur_point={point}"
+                f"last_point={state.last_point}, cur_point={point}, "
+                f"gate_p1={tuple(self.gate_p1)}, gate_p2={tuple(self.gate_p2)}"
             )
-        else:
-            intersects = False
+        elif state.last_side != cur_side:
+            # Side changed but one side is 0 (on the line)
+            logger.debug(
+                f"Track {track_id}: Side changed ({state.last_side} -> {cur_side}) but one side is 0 (on line)"
+            )
         
         # Check if side changed and both sides are non-zero
         if state.last_side == 0 or cur_side == 0:
@@ -310,12 +321,7 @@ class GateCounterSegment:
             state.last_side = cur_side
             return None
         
-        if not intersects:
-            # No intersection, update state
-            state.last_point = point
-            state.last_ts = ts
-            state.last_side = cur_side
-            return None
+        # REMOVED: Duplicate check that was causing issues
         
         # Valid crossing detected!
         # Determine direction

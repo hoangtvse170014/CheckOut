@@ -90,85 +90,41 @@ def get_realtime_count(cursor: sqlite3.Cursor, target_date: str) -> int:
 
 def get_missing_periods(cursor: sqlite3.Cursor, target_date: str, total_morning: int) -> List[Dict]:
     """
-    Calculate MISSING PERIODS: Periods where REALTIME < TOTAL_MORNING.
-    
-    A missing period:
-    - Starts when: REALTIME < TOTAL_MORNING
-    - Ends when: REALTIME == TOTAL_MORNING
+    Get MISSING PERIODS from missing_periods table.
     
     Args:
         cursor: Database cursor
         target_date: Date in YYYY-MM-DD format
-        total_morning: Total morning count
+        total_morning: Total morning count (not used, kept for compatibility)
     
     Returns:
-        List of missing period dicts with: start_time, end_time, duration_minutes
+        List of missing period dicts with: start_time, end_time, duration_minutes, session
     """
-    if total_morning == 0:
-        return []
-    
     try:
-        # Get all events for the day in chronological order
+        # Get missing periods from database
         cursor.execute("""
-            SELECT timestamp, direction
-            FROM events
-            WHERE substr(timestamp, 1, 10) = ?
-            ORDER BY timestamp ASC
+            SELECT start_time, end_time, duration_minutes, session, alert_sent
+            FROM missing_periods
+            WHERE substr(start_time, 1, 10) = ?
+            ORDER BY start_time ASC
         """, (target_date,))
         
-        events = cursor.fetchall()
-        
-        if not events:
-            return []
+        rows = cursor.fetchall()
         
         periods = []
-        current_count = 0
-        period_start = None
-        
-        for event_time, direction in events:
-            # Update count
-            if direction.upper() == 'IN':
-                current_count += 1
-            elif direction.upper() == 'OUT':
-                current_count -= 1
-            
-            # Check if we enter a missing period
-            if current_count < total_morning and period_start is None:
-                period_start = event_time
-            
-            # Check if we exit a missing period
-            elif current_count >= total_morning and period_start is not None:
-                # Calculate duration
-                start_dt = datetime.fromisoformat(period_start.replace('Z', '+00:00'))
-                end_dt = datetime.fromisoformat(event_time.replace('Z', '+00:00'))
-                duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
-                
-                periods.append({
-                    'start_time': period_start,
-                    'end_time': event_time,
-                    'duration_minutes': duration_minutes
-                })
-                period_start = None
-        
-        # If period is still open at end of day
-        if period_start is not None:
-            # Use last event time or current time
-            last_event_time = events[-1][0] if events else target_date + "T23:59:59"
-            start_dt = datetime.fromisoformat(period_start.replace('Z', '+00:00'))
-            end_dt = datetime.fromisoformat(last_event_time.replace('Z', '+00:00'))
-            duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
-            
+        for row in rows:
+            start_time, end_time, duration_minutes, session, alert_sent = row
             periods.append({
-                'start_time': period_start,
-                'end_time': last_event_time,
-                'duration_minutes': duration_minutes
+                'start_time': start_time,
+                'end_time': end_time if end_time else '',  # Empty string if still active
+                'duration_minutes': duration_minutes if duration_minutes else 0,
+                'session': session,
+                'alert_sent': bool(alert_sent) if alert_sent is not None else False,
             })
         
-        logger.debug(f"Found {len(periods)} missing periods for {target_date}")
         return periods
-        
-    except Exception as e:
-        logger.error(f"Error calculating missing periods: {e}", exc_info=True)
+    except sqlite3.Error as e:
+        logger.warning(f"Error getting missing periods: {e}")
         return []
 
 

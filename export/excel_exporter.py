@@ -22,8 +22,8 @@ def export_daily_excel(
     target_date: str,
     db_path: str,
     output_dir: str = "exports/daily",
-    morning_start: str = "11:05",
-    morning_end: str = "11:14"
+    morning_start: str = "06:00",
+    morning_end: str = "08:30"
 ) -> bool:
     """
     Export daily Excel file - completely rebuilt from database.
@@ -107,12 +107,13 @@ def export_daily_excel(
                 if data['missing_periods']:
                     missing_periods_data = {
                         'start_time': [p['start_time'] for p in data['missing_periods']],
-                        'end_time': [p['end_time'] for p in data['missing_periods']],
-                        'duration_minutes': [p['duration_minutes'] for p in data['missing_periods']]
+                        'end_time': [p.get('end_time', '') for p in data['missing_periods']],
+                        'duration_minutes': [p.get('duration_minutes', 0) for p in data['missing_periods']],
+                        'session': [p.get('session', '') for p in data['missing_periods']]
                     }
                     df_missing = pd.DataFrame(missing_periods_data)
                 else:
-                    df_missing = pd.DataFrame(columns=['start_time', 'end_time', 'duration_minutes'])
+                    df_missing = pd.DataFrame(columns=['start_time', 'end_time', 'duration_minutes', 'session'])
                 df_missing.to_excel(writer, sheet_name='MISSING_PERIODS', index=False)
                 
                 # Sheet 3: ALERTS

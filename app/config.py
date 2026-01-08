@@ -29,7 +29,7 @@ class CameraConfig(BaseSettings):
         description="Unique camera identifier"
     )
     max_resolution: Optional[int] = Field(
-        default=None,
+        default=None,  # Use original resolution for best accuracy
         description="Maximum resolution for detection (resize if larger). None = use original resolution"
     )
 
@@ -42,7 +42,7 @@ class DetectionConfig(BaseSettings):
         description="YOLO model name (yolov8n.pt, yolov8s.pt, yolov8m.pt, etc.)"
     )
     conf_threshold: float = Field(
-        default=0.5,
+        default=0.4,  # Lower threshold for faster processing (was 0.5)
         ge=0.0,
         le=1.0,
         description="Confidence threshold for detections"
@@ -58,7 +58,7 @@ class DetectionConfig(BaseSettings):
         description="Device to run inference on (cpu, cuda for NVIDIA GPU, mps for Apple Silicon)"
     )
     imgsz: Optional[int] = Field(
-        default=320,
+        default=256,  # Reduced from 320 to 256 for maximum FPS
         description="Input image size for YOLO (320 = fast, 256 = faster, 640 = more accurate)"
     )
 
@@ -203,7 +203,7 @@ class GateConfig(BaseSettings):
     
     # Anti-jitter params
     cooldown_sec: float = Field(
-        default=0.5,
+        default=2.0,  # Increased from 0.5 to 2.0 seconds to prevent double counting
         description="Cooldown time in seconds to prevent double counting"
     )
     min_frames_in_gate: int = Field(
@@ -280,8 +280,8 @@ class WindowConfig(BaseSettings):
     """Time window configuration."""
     
     timezone: str = Field(
-        default="Asia/Bangkok",
-        description="Timezone for window calculations"
+        default="Asia/Ho_Chi_Minh",
+        description="Timezone for window calculations (default: Asia/Ho_Chi_Minh)"
     )
     window_a_start: str = Field(
         default="12:00",
@@ -369,16 +369,24 @@ class ProductionConfig(BaseSettings):
     """Production scheduler configuration."""
     
     reset_time: str = Field(
-        default="00:00",
-        description="Daily reset time (HH:MM)"
+        default="06:00",  # Changed from 00:00 to 06:00 per requirements (reset and start counting at 06:00)
+        description="Daily reset time (HH:MM) - should be 06:00 to reset and start TOTAL_MORNING counting"
     )
     morning_start: str = Field(
-        default="11:05",
-        description="Morning count phase start (HH:MM)"
+        default="06:00",
+        description="Morning count phase start (HH:MM) - default 06:00"
     )
     morning_end: str = Field(
-        default="11:14",
-        description="Morning count phase end (HH:MM)"
+        default="08:30",
+        description="Morning count phase end (HH:MM) - default 08:30"
+    )
+    realtime_morning_end: str = Field(
+        default="11:55",
+        description="Realtime morning monitoring end (HH:MM) - default 11:55"
+    )
+    lunch_end: str = Field(
+        default="13:15",
+        description="Lunch break end (HH:MM) - default 13:15"
     )
     alert_interval_min: int = Field(
         default=1,
