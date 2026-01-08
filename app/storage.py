@@ -117,6 +117,13 @@ class Storage:
                 )
             """)
             
+            # Add notification_status column if it doesn't exist (migration)
+            cursor.execute("PRAGMA table_info(alert_logs)")
+            alert_logs_columns = [row[1] for row in cursor.fetchall()]
+            if 'notification_status' not in alert_logs_columns:
+                cursor.execute("ALTER TABLE alert_logs ADD COLUMN notification_status TEXT DEFAULT 'sent'")
+                logger.info("Added notification_status column to alert_logs table")
+            
             # Alerts table: alert history (legacy)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -539,11 +546,21 @@ class Storage:
             
             # Also save to alert_logs table (for export) if expected_total and current_total provided
             if expected_total is not None and current_total is not None:
-                cursor.execute("""
-                    INSERT INTO alert_logs 
-                    (alert_time, expected_total, current_total, missing)
-                    VALUES (?, ?, ?, ?)
-                """, (now, expected_total, current_total, difference))
+                # Check if notification_status column exists
+                cursor.execute("PRAGMA table_info(alert_logs)")
+                alert_logs_columns = [row[1] for row in cursor.fetchall()]
+                if 'notification_status' in alert_logs_columns:
+                    cursor.execute("""
+                        INSERT INTO alert_logs 
+                        (alert_time, expected_total, current_total, missing, notification_status)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (now, expected_total, current_total, difference, notification_status))
+                else:
+                    cursor.execute("""
+                        INSERT INTO alert_logs 
+                        (alert_time, expected_total, current_total, missing)
+                        VALUES (?, ?, ?, ?)
+                    """, (now, expected_total, current_total, difference))
             
             conn.commit()
             logger.info(f"Alert saved: date={date}, diff={difference}, status={notification_status}")
@@ -988,15 +1005,30 @@ class Storage:
         cursor = conn.cursor()
         
         try:
-            cursor.execute("""
-                SELECT alert_time
-                FROM alert_logs
-                WHERE substr(alert_time, 1, 10) = ?
-                  AND phase = ?
-                  AND notification_status = 'sent'
-                ORDER BY alert_time DESC
-                LIMIT 1
-            """, (date, session))
+            # Check if notification_status column exists
+            cursor.execute("PRAGMA table_info(alert_logs)")
+            alert_logs_columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'notification_status' in alert_logs_columns:
+                cursor.execute("""
+                    SELECT alert_time
+                    FROM alert_logs
+                    WHERE substr(alert_time, 1, 10) = ?
+                      AND phase = ?
+                      AND (notification_status = 'sent' OR notification_status IS NULL)
+                    ORDER BY alert_time DESC
+                    LIMIT 1
+                """, (date, session))
+            else:
+                # Fallback if notification_status column doesn't exist
+                cursor.execute("""
+                    SELECT alert_time
+                    FROM alert_logs
+                    WHERE substr(alert_time, 1, 10) = ?
+                      AND phase = ?
+                    ORDER BY alert_time DESC
+                    LIMIT 1
+                """, (date, session))
             
             row = cursor.fetchone()
             if row:
@@ -1017,6 +1049,60 @@ class Storage:
                 except Exception as e:
                     logger.error(f"Failed to parse alert_time '{alert_time_str}': {e}")
                     return None
+            return None
+        finally:
+            conn.close()
+    
+    def get_last_alert_missing_count(
+        self,
+        date: str,
+        session: str,
+    ) -> Optional[int]:
+        """
+        Get the missing count from the last alert sent for a date and session.
+        
+        Args:
+            date: Date string (YYYY-MM-DD)
+            session: 'morning' or 'afternoon'
+        
+        Returns:
+            Missing count from last alert or None if no alert sent
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if notification_status column exists
+            cursor.execute("PRAGMA table_info(alert_logs)")
+            alert_logs_columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'notification_status' in alert_logs_columns:
+                cursor.execute("""
+                    SELECT missing
+                    FROM alert_logs
+                    WHERE substr(alert_time, 1, 10) = ?
+                      AND phase = ?
+                      AND (notification_status = 'sent' OR notification_status IS NULL)
+                    ORDER BY alert_time DESC
+                    LIMIT 1
+                """, (date, session))
+            else:
+                # Fallback if notification_status column doesn't exist
+                cursor.execute("""
+                    SELECT missing
+                    FROM alert_logs
+                    WHERE substr(alert_time, 1, 10) = ?
+                      AND phase = ?
+                    ORDER BY alert_time DESC
+                    LIMIT 1
+                """, (date, session))
+            
+            row = cursor.fetchone()
+            if row:
+                return row[0] if row[0] is not None else None
+            return None
+        except sqlite3.Error as e:
+            logger.error(f"Error getting last alert missing count: {e}", exc_info=True)
             return None
         finally:
             conn.close()

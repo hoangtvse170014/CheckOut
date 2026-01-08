@@ -87,9 +87,12 @@ class PhaseManager:
             total_morning = self.storage.get_total_morning_from_events(date_str, morning_start, morning_end)
         
         realtime_count = self.storage.get_current_realtime_count(date_str, self.camera_id)
+        # Ensure realtime_count is never negative
+        realtime_count = max(0, realtime_count)
         
-        # Check if missing
-        is_missing = total_morning > realtime_count
+        # Check if missing: missing = total_morning - realtime
+        missing_count = total_morning - realtime_count
+        is_missing = missing_count > 0
         
         if is_missing:
             # Check if we already have an active missing period for this session
@@ -127,14 +130,13 @@ class PhaseManager:
         Returns:
             Duration in minutes or None if no active period
         """
-        if session not in self.active_missing_periods:
-            return None
-        
         now = datetime.now(self.tz)
         date_str = now.strftime("%Y-%m-%d")
         active_period = self.storage.get_active_missing_period(date_str, session)
         
         if not active_period:
+            # Check if there's a missing period in database even if not in active_missing_periods
+            # This handles the case where app restarted but missing period still exists
             return None
         
         start_time = datetime.fromisoformat(active_period['start_time'].replace('Z', '+00:00'))
