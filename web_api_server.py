@@ -84,10 +84,10 @@ def init_camera():
             if camera_cap and camera_cap.isOpened():
                 # Set buffer size to reduce latency
                 camera_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                logger.info(f"✅ Camera initialized for web server: {camera_url}")
+                logger.info(f"Camera initialized for web server: {camera_url}")
                 return True
             else:
-                logger.warning("❌ Could not open camera for web server")
+                logger.warning("Could not open camera for web server")
                 camera_cap = None
                 return False
         else:
@@ -321,7 +321,7 @@ def get_db_data() -> dict:
             
             # Try to get from daily_state first (more accurate, matches app logic)
             cursor.execute("""
-                SELECT total_morning, realtime_in, realtime_out
+                SELECT total_morning, realtime_in, realtime_out, is_frozen
                 FROM daily_state
                 WHERE date = ?
             """, (today,))
@@ -329,22 +329,48 @@ def get_db_data() -> dict:
             state_row = cursor.fetchone()
             
             if state_row:
-                # Use values from daily_state (app's calculated values)
-                total_morning = state_row[0] or 0
+                total_morning_db = state_row[0]
                 realtime_in = state_row[1] or 0
                 realtime_out = state_row[2] or 0
+                is_frozen = bool(state_row[3]) if state_row[3] is not None else False
                 
-                # Calculate realtime: initial_total + (realtime_in - realtime_out)
-                # initial_total = total_morning (from morning phase)
-                initial_total = total_morning
-                realtime = initial_total + (realtime_in - realtime_out)
+                # CRITICAL: Use daily_state.total_morning if it exists AND is_frozen=True
+                # BUT: Verify if total_morning=0 but there are events in morning phase (might be wrong if app restarted)
+                if is_frozen and total_morning_db is not None:
+                    total_morning_frozen = total_morning_db
+                    
+                    # VERIFY: If total_morning=0 but there are events in morning phase, recalculate (app may have restarted)
+                    if total_morning_frozen == 0:
+                        total_morning_from_events = get_total_morning(cursor, today, MORNING_START, MORNING_END)
+                        if total_morning_from_events > 0:
+                            # There are events but total_morning=0 - likely app restarted, use calculated value
+                            total_morning = total_morning_from_events
+                        else:
+                            # No events, 0 is correct
+                            total_morning = 0
+                    else:
+                        # Use frozen value (non-zero)
+                        total_morning = total_morning_frozen
+                else:
+                    # Not frozen yet or doesn't exist, calculate from events
+                    total_morning = get_total_morning(cursor, today, MORNING_START, MORNING_END)
+                
+                # Calculate realtime: Use daily_state if available
+                # realtime = total_morning (frozen) + (realtime_in - realtime_out)
+                realtime = total_morning + (realtime_in - realtime_out)
+                # Ensure realtime is never negative
+                realtime = max(0, realtime)
             else:
                 # Fallback: calculate from events if daily_state not available
                 total_morning = get_total_morning(cursor, today, MORNING_START, MORNING_END)
                 realtime = get_realtime_count(cursor, today)
+                # Ensure realtime is never negative
+                realtime = max(0, realtime)
             
-            # Calculate missing (never negative)
-            missing = max(0, total_morning - realtime) if total_morning > 0 else 0
+            # Calculate missing: missing = total_morning - realtime
+            missing = total_morning - realtime
+            # Ensure missing is never negative
+            missing = max(0, missing)
             
             # Get last update time (last event timestamp or current time)
             cursor.execute("""
@@ -621,76 +647,88 @@ async def root():
         }
         
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Arial', 'Helvetica', sans-serif;
+            background: #1a1a1a;
             min-height: 100vh;
-            padding: 20px;
+            padding: 0;
+            margin: 0;
             display: flex;
+            justify-content: center;
+            align-items: center;
+            box-sizing: border-box;
+            border: 14px solid green;
+            overflow: hidden;
+        }
+        
+        .container {
+            background: #1a1a1a;
+            width: 100%;
+            height: 100vh;
+            padding: 60px;
+            display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
         }
         
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 40px;
-            max-width: 900px;
-            width: 100%;
-        }
-        
         h1 {
             text-align: center;
-            color: #333;
-            margin-bottom: 30px;
-            font-size: 2.5em;
+            color: #ffffff;
+            margin-bottom: 80px;
+            font-size: 5em;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
         }
         
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 60px;
+            width: 100%;
+            max-width: 2400px;
+            margin-bottom: 60px;
         }
         
         .stat-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 15px;
-            padding: 25px;
+            background: #2d2d2d;
+            border-radius: 30px;
+            padding: 80px 60px;
             text-align: center;
             color: white;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
-            transition: transform 0.3s;
-        }
-        
-        .stat-card:hover {
-            transform: translateY(-5px);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            border: 4px solid rgba(255,255,255,0.1);
         }
         
         .stat-label {
-            font-size: 0.9em;
+            font-size: 2.5em;
             opacity: 0.9;
             text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 10px;
+            letter-spacing: 3px;
+            margin-bottom: 40px;
+            font-weight: 600;
         }
         
         .stat-value {
-            font-size: 2.5em;
+            font-size: 12em;
             font-weight: bold;
-            margin: 10px 0;
+            margin: 40px 0;
+            line-height: 1;
+            text-shadow: 3px 3px 6px rgba(0,0,0,0.8);
         }
         
         .stat-card.missing {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            background: #8b1a1a;
+            border-color: #ff4444;
         }
         
         .stat-card.morning {
-            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            background: #1a3a5c;
+            border-color: #4a9eff;
         }
         
         .stat-card.realtime {
-            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            background: #1a5c3a;
+            border-color: #4aff9e;
         }
         
         @keyframes pulse {
@@ -700,12 +738,19 @@ async def root():
         
         .info {
             text-align: center;
-            color: #666;
-            font-size: 0.9em;
+            color: #aaaaaa;
+            font-size: 2em;
+            margin-top: 40px;
+            padding: 30px;
+            background: #2d2d2d;
+            border-radius: 20px;
+            border: 2px solid rgba(255,255,255,0.1);
+        }
+        
+        .time-info {
+            font-size: 1.5em;
+            color: #888888;
             margin-top: 20px;
-            padding: 15px;
-            background: #f5f5f5;
-            border-radius: 10px;
         }
         
         .loading {
@@ -726,9 +771,9 @@ async def root():
 </head>
 <body>
     <div class="container">
-        <h1>👥 People Counter Dashboard</h1>
+        <h1>PEOPLE COUNTER</h1>
         
-        <div id="phase-indicator" style="text-align: center; padding: 15px; margin-bottom: 20px; border-radius: 10px; font-weight: bold; font-size: 1.1em; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+        <div id="phase-indicator" style="text-align: center; padding: 30px; margin-bottom: 60px; border-radius: 20px; font-weight: bold; font-size: 2.5em; background: #2d2d2d; color: white; border: 3px solid rgba(255,255,255,0.2);">
             <span id="phase-text">Loading...</span>
         </div>
         
@@ -736,7 +781,7 @@ async def root():
             <div class="stat-card morning">
                 <div class="stat-label">Total Morning</div>
                 <div class="stat-value" id="total-morning">-</div>
-                <div style="font-size: 0.8em; opacity: 0.8;">(06:00 - 08:30)</div>
+                <div style="font-size: 1.8em; opacity: 0.8; margin-top: 30px;">(06:00 - 08:30)</div>
             </div>
             
             <div class="stat-card realtime">
@@ -748,38 +793,12 @@ async def root():
                 <div class="stat-label">Missing People</div>
                 <div class="stat-value" id="missing">-</div>
             </div>
-            
         </div>
         
         <div class="info">
             <div><strong>Last Update:</strong> <span id="last-update">-</span></div>
-            <div style="margin-top: 10px; font-size: 0.85em;">
-                Auto-refreshes every 5 seconds
-            </div>
-        </div>
-        
-        <div style="margin-top: 30px; background: #000; border-radius: 15px; padding: 20px; text-align: center;">
-            <h2 style="color: white; margin-bottom: 15px;">📹 Camera Stream</h2>
-            <img src="/video" alt="Camera Stream" style="max-width: 100%; border-radius: 10px; border: 3px solid #667eea;">
-        </div>
-        
-        <div style="margin-top: 30px; background: white; border-radius: 15px; padding: 20px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);">
-            <h2 style="color: #333; margin-bottom: 15px; text-align: center;">📋 Recent Events</h2>
-            <div style="max-height: 400px; overflow-y: auto;">
-                <table id="events-table" style="width: 100%; border-collapse: collapse;">
-                    <thead>
-                        <tr style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                            <th style="padding: 12px; text-align: left; border-radius: 8px 0 0 0;">Time</th>
-                            <th style="padding: 12px; text-align: center;">Direction</th>
-                            <th style="padding: 12px; text-align: left; border-radius: 0 8px 0 0;">Camera</th>
-                        </tr>
-                    </thead>
-                    <tbody id="events-body">
-                        <tr>
-                            <td colspan="3" style="padding: 20px; text-align: center; color: #999;">Loading events...</td>
-                        </tr>
-                    </tbody>
-                </table>
+            <div class="time-info">
+                Auto-refreshes every 1 second
             </div>
         </div>
         
@@ -796,11 +815,21 @@ async def root():
                     return response.json();
                 })
                 .then(data => {
+                    // Calculate missing count
+                    const missingCount = Math.max(0, (data.total_morning ?? 0) - (data.realtime_count ?? 0));
+                    
+                    // Update border color based on missing_count
+                    if (missingCount === 0) {
+                        document.body.style.border = '12px solid green';
+                    } else {
+                        document.body.style.border = '12px solid red';
+                    }
+                    
                     // Map JSON fields to UI elements
                     const elements = {
                         'total-morning': data.total_morning ?? 0,
                         'realtime': data.realtime_count ?? 0,
-                        'missing': data.missing_now ? (data.total_morning - data.realtime_count) : 0,
+                        'missing': missingCount,
                         'last-update': data.last_update || '--'
                     };
                     
@@ -824,12 +853,6 @@ async def root():
                         phaseText.textContent = phaseNames[data.phase] || data.phase.toUpperCase();
                     }
                     
-                    // Update missing card style
-                    const missingCard = document.querySelector('.stat-card.missing');
-                    if (missingCard && data.missing_now) {
-                        missingCard.style.animation = 'pulse 2s infinite';
-                    }
-                    
                     // Hide error message if exists
                     const errorEl = document.getElementById('error-message');
                     if (errorEl) errorEl.style.display = 'none';
@@ -850,45 +873,6 @@ async def root():
                 });
         }
         
-        function updateEvents() {
-            fetch('/api/events?limit=50')
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error('Network response was not ok');
-                    }
-                    return response.json();
-                })
-                .then(events => {
-                    const tbody = document.getElementById('events-body');
-                    if (events.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="3" style="padding: 20px; text-align: center; color: #999;">No events yet</td></tr>';
-                        return;
-                    }
-                    
-                    // Reverse to show newest first
-                    events.reverse();
-                    
-                    tbody.innerHTML = events.map(event => {
-                        const directionColor = event.direction === 'IN' ? '#4CAF50' : '#f5576c';
-                        const directionIcon = event.direction === 'IN' ? '⬇️' : '⬆️';
-                        return `
-                            <tr style="border-bottom: 1px solid #eee;">
-                                <td style="padding: 10px;">${event.event_time}</td>
-                                <td style="padding: 10px; text-align: center;">
-                                    <span style="color: ${directionColor}; font-weight: bold;">
-                                        ${directionIcon} ${event.direction}
-                                    </span>
-                                </td>
-                                <td style="padding: 10px;">${event.camera_id || '-'}</td>
-                            </tr>
-                        `;
-                    }).join('');
-                })
-                .catch(error => {
-                    console.error('Error fetching events:', error);
-                });
-        }
-        
         // Force update immediately when script loads
         console.log('Dashboard script loaded');
         
@@ -896,18 +880,15 @@ async def root():
         setTimeout(function() {
             console.log('Initial dashboard update...');
             updateDashboard();
-            updateEvents();
         }, 100);
         
         // Initialize dashboard on page load
         function initDashboard() {
             // Update immediately
             updateDashboard();
-            updateEvents();
             
-            // Auto-refresh every 1 second (as required)
+            // Auto-refresh every 1 second
             setInterval(updateDashboard, 1000);
-            setInterval(updateEvents, 5000); // Events every 5 seconds
         }
         
         // Start when DOM is ready
@@ -930,9 +911,9 @@ if __name__ == "__main__":
     logger.info("Initializing camera...")
     camera_ok = init_camera()
     if camera_ok:
-        logger.info("✅ Camera initialized successfully")
+        logger.info("Camera initialized successfully")
     else:
-        logger.warning("⚠️  Camera not available. Stream will show placeholder.")
+        logger.warning("Camera not available. Stream will show placeholder.")
         logger.warning("   Make sure camera is connected and configured in .env file")
     
     # Get LAN IP
@@ -940,18 +921,18 @@ if __name__ == "__main__":
     
     # Print access information
     print("=" * 60)
-    print("🚀 FastAPI Web Server Starting...")
+    print("FastAPI Web Server Starting...")
     print("=" * 60)
-    print(f"📍 Local access: http://localhost:{PORT}")
+    print(f"Local access: http://localhost:{PORT}")
     if lan_ip:
-        print(f"🌐 LAN access: http://{lan_ip}:{PORT}")
-        print(f"💻 Open from another PC: http://{lan_ip}:{PORT}")
+        print(f"LAN access: http://{lan_ip}:{PORT}")
+        print(f"Open from another PC: http://{lan_ip}:{PORT}")
     else:
-        print("⚠️  Could not detect LAN IP address")
+        print("Could not detect LAN IP address")
     if camera_ok:
-        print("✅ Camera: Connected")
+        print("Camera: Connected")
     else:
-        print("⚠️  Camera: Not available")
+        print("Camera: Not available")
     print("=" * 60)
     print("Press Ctrl+C to stop the server")
     print("=" * 60)

@@ -791,10 +791,21 @@ class Storage:
             realtime_in = state.get('realtime_in', 0)
             realtime_out = state.get('realtime_out', 0)
             
-            # Calculate: total_morning + realtime_in - realtime_out
-            realtime_count = total_morning + realtime_in - realtime_out
-            logger.debug(f"Realtime count from daily_state: {realtime_count} (total_morning={total_morning}, realtime_in={realtime_in}, realtime_out={realtime_out})")
-            return realtime_count
+            # If total_morning is 0 but we have realtime_in/out, recalculate total_morning from events
+            if total_morning == 0 and (realtime_in > 0 or realtime_out > 0):
+                # total_morning might be incorrect (0), recalculate from events
+                morning_start = "06:00"
+                morning_end = "08:30"
+                total_morning = self.get_total_morning_from_events(date, morning_start, morning_end)
+                logger.debug(f"Recalculated total_morning from events: {total_morning} (daily_state had 0)")
+            
+            # If we have valid data, use it
+            if total_morning > 0 or (realtime_in > 0 or realtime_out > 0):
+                # Calculate: total_morning + realtime_in - realtime_out
+                realtime_count = total_morning + realtime_in - realtime_out
+                logger.debug(f"Realtime count from daily_state: {realtime_count} (total_morning={total_morning}, realtime_in={realtime_in}, realtime_out={realtime_out})")
+                return realtime_count
+            # If no valid data, fall through to events table calculation
         
         # Fallback: calculate from events table
         conn = self._get_connection()

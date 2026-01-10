@@ -89,20 +89,42 @@ class ExcelExportScheduler:
                 now = datetime.now()
                 current_time = now.time()
                 
-                # Check if it's 00:00 (start of new day - finalize yesterday and run aggregated export)
-                if current_time.hour == 0 and current_time.minute == 0:
-                    # Finalize yesterday's file
+                # Check if it's 06:00 (daily reset - create new Excel file for today)
+                if current_time.hour == 6 and current_time.minute == 0:
+                    # Create new Excel file for today (new day starts at 06:00)
+                    today = date.today().strftime('%Y-%m-%d')
+                    today_file = self.daily_dir / f"people_counter_{today}.xlsx"
+                    logger.info(f"Daily reset at 06:00 - Creating new Excel file for today: {today_file.name}")
+                    self._export_daily_excel(today, today_file)
+                    
+                    # Finalize yesterday's file (if not already done)
                     yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
                     yesterday_file = self.daily_dir / f"people_counter_{yesterday}.xlsx"
                     if not yesterday_file.exists():
-                        # Export yesterday's final file
+                        logger.info(f"Finalizing yesterday's file: {yesterday_file.name}")
                         self._export_daily_excel(yesterday, yesterday_file)
                     
-                    # Run rolling summary export (replaces old aggregated export)
+                    # Run rolling summary export
                     self._export_rolling_summary()
                     
                     # Run cleanup
                     self._cleanup_old_files()
+                    
+                    # Wait until next minute to avoid multiple exports
+                    time.sleep(60)
+                    continue
+                
+                # Check if it's 00:00 (midnight - legacy support, but daily reset is at 06:00)
+                if current_time.hour == 0 and current_time.minute == 0:
+                    # Finalize yesterday's file (if not already done at 06:00)
+                    yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+                    yesterday_file = self.daily_dir / f"people_counter_{yesterday}.xlsx"
+                    if not yesterday_file.exists():
+                        logger.info(f"Midnight check - Finalizing yesterday's file: {yesterday_file.name}")
+                        self._export_daily_excel(yesterday, yesterday_file)
+                    
+                    # Run rolling summary export
+                    self._export_rolling_summary()
                     
                     # Wait until next minute to avoid multiple exports
                     time.sleep(60)

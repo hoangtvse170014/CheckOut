@@ -300,7 +300,7 @@ class PeopleCounterApp:
         self.web_server = None  # Disabled for now
         
         logger.info("All components initialized")
-        
+    
         # Background I/O queue for non-blocking database writes and snapshots
         # REDUCED: Smaller queue size to prevent memory buildup (10 items max = ~10MB max if all are snapshots)
         self._io_queue = queue.Queue(maxsize=10)  # Reduced from 100 to prevent memory issues
@@ -569,7 +569,7 @@ class PeopleCounterApp:
             # FPS OPTIMIZATION: Cache datetime.now() - only update every 100ms instead of every frame
             if (self._cached_datetime is None or 
                 current_time_float - self._cached_datetime[0] >= self._datetime_cache_interval):
-                now_dt = datetime.now(self.time_manager.tz)
+            now_dt = datetime.now(self.time_manager.tz)
                 self._cached_datetime = (current_time_float, now_dt)
             
             current_phase = self._cached_phase
@@ -698,6 +698,17 @@ class PeopleCounterApp:
             logger.info(f"Closed any open missing periods from {yesterday}")
         except Exception as e:
             logger.warning(f"Could not close missing periods: {e}")
+        
+        # Create new Excel file for today (new day starts at 06:00)
+        if self.excel_export_scheduler:
+            try:
+                from pathlib import Path
+                output_file = Path("exports") / "daily" / f"people_counter_{today}.xlsx"
+                logger.info(f"Creating new Excel file for today: {output_file.name}")
+                self.excel_export_scheduler._export_daily_excel(today, output_file)
+                logger.info(f"New Excel file created successfully: {output_file.name}")
+            except Exception as e:
+                logger.error(f"Error creating new Excel file: {e}", exc_info=True)
         
         logger.info("Daily reset completed. TOTAL_MORNING counting started at 06:00")
     
@@ -1005,13 +1016,13 @@ class PeopleCounterApp:
                                 total = self.initial_count_in - self.initial_count_out
                                 # OPTIMIZED: Throttle logging (only log every 10th event or important ones)
                                 if self.initial_count_in % 10 == 1:
-                                    logger.info(f"Morning phase: Person entered. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                                logger.info(f"Morning phase: Person entered. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
                             elif event.direction == "OUT":
                                 self.initial_count_out += 1
                                 total = self.initial_count_in - self.initial_count_out
                                 # OPTIMIZED: Throttle logging
                                 if self.initial_count_out % 10 == 1:
-                                    logger.info(f"Morning phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
+                                logger.info(f"Morning phase: Person exited. IN: {self.initial_count_in}, OUT: {self.initial_count_out}, Total: {total}")
                             
                             # Lưu total_morning ngay khi có events (để alert_manager có thể check)
                             # OPTIMIZED: Use background queue instead of blocking write
@@ -1026,7 +1037,7 @@ class PeopleCounterApp:
                                 })
                             except queue.Full:
                                 logger.warning("I/O queue full, writing daily state directly")
-                                self.storage.save_daily_state(date=today, total_morning=total_morning)
+                            self.storage.save_daily_state(date=today, total_morning=total_morning)
                         else:
                             # Realtime monitoring phase: Đếm vào realtime_in/out
                             if event.direction == "IN":
@@ -1035,7 +1046,7 @@ class PeopleCounterApp:
                                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
                                 # OPTIMIZED: Throttle logging
                                 if self.realtime_in % 10 == 1:
-                                    logger.info(f"Realtime: Person entered. Realtime IN: {self.realtime_in}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
+                                logger.info(f"Realtime: Person entered. Realtime IN: {self.realtime_in}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
                                 
                                 # Lưu realtime_in vào state để alert_manager sử dụng
                                 # OPTIMIZED: Use background queue instead of blocking write
@@ -1049,7 +1060,7 @@ class PeopleCounterApp:
                                     })
                                 except queue.Full:
                                     logger.warning("I/O queue full, writing realtime counters directly")
-                                    self.storage.save_daily_state(date=today, realtime_in=self.realtime_in)
+                                self.storage.save_daily_state(date=today, realtime_in=self.realtime_in)
                                 
                             elif event.direction == "OUT":
                                 self.realtime_out += 1
@@ -1057,7 +1068,7 @@ class PeopleCounterApp:
                                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
                                 # OPTIMIZED: Throttle logging
                                 if self.realtime_out % 10 == 1:
-                                    logger.info(f"Realtime: Person exited. Realtime OUT: {self.realtime_out}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
+                                logger.info(f"Realtime: Person exited. Realtime OUT: {self.realtime_out}, Initial Total: {initial_total}, Realtime count: {realtime_count}")
                                 
                                 # Lưu realtime_out vào state để alert_manager sử dụng
                                 # OPTIMIZED: Use background queue instead of blocking write
@@ -1071,7 +1082,7 @@ class PeopleCounterApp:
                                     })
                                 except queue.Full:
                                     logger.warning("I/O queue full, writing realtime counters directly")
-                                    self.storage.save_daily_state(date=today, realtime_out=self.realtime_out)
+                                self.storage.save_daily_state(date=today, realtime_out=self.realtime_out)
                         
                         # OPTIMIZED: Save event to database via background queue (non-blocking)
                         # SQLite (always save for compatibility with existing code)
@@ -1090,17 +1101,17 @@ class PeopleCounterApp:
                             logger.warning("I/O queue full, writing event directly to database to prevent data loss")
                             try:
                                 self.storage.add_event(
-                                    track_id=track_id,
-                                    direction=event.direction.lower(),
-                                    camera_id=self.config.camera.camera_id,
-                                )
+                            track_id=track_id,
+                            direction=event.direction.lower(),
+                            camera_id=self.config.camera.camera_id,
+                        )
                             except Exception as e:
                                 logger.error(f"CRITICAL: Direct event write failed: {e}", exc_info=True)
                         
                         # PostgreSQL (if enabled, non-blocking)
                         if self.postgres_writer:
                             try:
-                                event_time = datetime.fromtimestamp(event.timestamp)
+                            event_time = datetime.fromtimestamp(event.timestamp)
                                 self._io_queue.put_nowait({
                                     'type': 'postgres_event',
                                     'kwargs': {
@@ -1118,8 +1129,8 @@ class PeopleCounterApp:
                         if self.config.save_snapshots:
                             # Only try to save if queue is not full (avoid memory buildup)
                             if self._io_queue.qsize() < self._io_queue.maxsize * 0.7:  # Only if < 70% full
-                                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                                snapshot_path = Path(self.config.snapshot_dir) / f"gate_{track_id}_{event.direction}_{timestamp}.jpg"
+                            timestamp = time.strftime("%Y%m%d_%H%M%S")
+                            snapshot_path = Path(self.config.snapshot_dir) / f"gate_{track_id}_{event.direction}_{timestamp}.jpg"
                                 try:
                                     # Make a copy of frame for snapshot (background thread will write it)
                                     frame_copy = frame.copy()
@@ -1177,7 +1188,7 @@ class PeopleCounterApp:
                 
                 # Display frame
                 try:
-                    cv2.imshow("People Counter", overlay)
+                cv2.imshow("People Counter", overlay)
                 except Exception as e:
                     logger.error(f"Error displaying frame: {e}", exc_info=True)
                 

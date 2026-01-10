@@ -95,23 +95,49 @@ class PhaseManager:
         is_missing = missing_count > 0
         
         if is_missing:
-            # Check if we already have an active missing period for this session
-            if session not in self.active_missing_periods:
-                # Start new missing period
-                period_id = self.storage.create_missing_period(now, session)
-                self.active_missing_periods[session] = period_id
-                logger.info(f"Missing period started: session={session}, period_id={period_id}, missing={total_morning - realtime_count}")
-            else:
+            # Check if we already have an active missing period for this session (in database)
+            active_period = self.storage.get_active_missing_period(date_str, session)
+            
+            if active_period:
+                # Missing period already exists in database - sync with active_missing_periods dict
+                period_id = active_period['id']
+                if session not in self.active_missing_periods:
+                    self.active_missing_periods[session] = period_id
+                    logger.info(f"Synced missing period from database: session={session}, period_id={period_id}")
+                
                 # Update existing period (check duration for alert)
-                period_id = self.active_missing_periods[session]
-                active_period = self.storage.get_active_missing_period(date_str, session)
-                if active_period:
-                    start_time = datetime.fromisoformat(active_period['start_time'].replace('Z', '+00:00'))
-                    if start_time.tzinfo is None:
-                        start_time = self.tz.localize(start_time)
-                    
-                    duration_minutes = int((now - start_time).total_seconds() / 60)
-                    logger.debug(f"Missing period active: session={session}, duration={duration_minutes} minutes")
+                start_time = datetime.fromisoformat(active_period['start_time'].replace('Z', '+00:00'))
+                if start_time.tzinfo is None:
+                    start_time = self.tz.localize(start_time)
+                
+                duration_minutes = int((now - start_time).total_seconds() / 60)
+                logger.debug(f"Missing period active: session={session}, duration={duration_minutes} minutes, missing={missing_count}")
+            else:
+                # No active missing period in database - create new one
+                # But first check if session is in active_missing_periods dict (shouldn't happen, but handle it)
+                if session in self.active_missing_periods:
+                    logger.warning(f"active_missing_periods dict has session={session} but no database record - cleaning up")
+                    del self.active_missing_periods[session]
+                
+                # Start new missing period
+                # For afternoon session, start_time should be from when afternoon session started (13:00)
+                # For morning session, start_time should be from when morning session started (08:30)
+                if session == "afternoon":
+                    # Start from 13:00 today
+                    afternoon_start = now.replace(hour=13, minute=0, second=0, microsecond=0)
+                    if afternoon_start > now:
+                        # If 13:00 is in the future (shouldn't happen), use current time
+                        afternoon_start = now
+                    period_id = self.storage.create_missing_period(afternoon_start, session)
+                else:
+                    # Morning session: start from current time or 08:30 (whichever is later)
+                    morning_start = now.replace(hour=8, minute=30, second=0, microsecond=0)
+                    if morning_start > now:
+                        morning_start = now
+                    period_id = self.storage.create_missing_period(morning_start, session)
+                
+                self.active_missing_periods[session] = period_id
+                logger.info(f"Missing period started: session={session}, period_id={period_id}, missing={missing_count}")
         else:
             # No missing - close active period if exists
             if session in self.active_missing_periods:
