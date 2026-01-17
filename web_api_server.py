@@ -638,7 +638,7 @@ async def root():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>People Counter Dashboard</title>
+    <title>Bảng Điều Khiển Đếm Người</title>
     <style>
         * {
             margin: 0;
@@ -771,34 +771,34 @@ async def root():
 </head>
 <body>
     <div class="container">
-        <h1>PEOPLE COUNTER</h1>
+        <h1>ĐẾM NGƯỜI</h1>
         
         <div id="phase-indicator" style="text-align: center; padding: 30px; margin-bottom: 60px; border-radius: 20px; font-weight: bold; font-size: 2.5em; background: #2d2d2d; color: white; border: 3px solid rgba(255,255,255,0.2);">
-            <span id="phase-text">Loading...</span>
+            <span id="phase-text">Đang tải...</span>
         </div>
         
         <div class="stats-grid">
             <div class="stat-card morning">
-                <div class="stat-label">Total Morning</div>
+                <div class="stat-label">Tổng Sáng</div>
                 <div class="stat-value" id="total-morning">-</div>
                 <div style="font-size: 1.8em; opacity: 0.8; margin-top: 30px;">(06:00 - 08:30)</div>
             </div>
             
             <div class="stat-card realtime">
-                <div class="stat-label">Current Realtime</div>
+                <div class="stat-label">Thời Gian Thực</div>
                 <div class="stat-value" id="realtime">-</div>
             </div>
             
             <div class="stat-card missing">
-                <div class="stat-label">Missing People</div>
+                <div class="stat-label">Người Vắng Mặt</div>
                 <div class="stat-value" id="missing">-</div>
             </div>
         </div>
         
         <div class="info">
-            <div><strong>Last Update:</strong> <span id="last-update">-</span></div>
+            <div><strong>Cập Nhật Cuối:</strong> <span id="last-update">-</span></div>
             <div class="time-info">
-                Auto-refreshes every 1 second
+                Tự động làm mới mỗi 1 giây
             </div>
         </div>
         
@@ -845,10 +845,10 @@ async def root():
                     const phaseText = document.getElementById('phase-text');
                     if (phaseText) {
                         const phaseNames = {
-                            'morning': 'MORNING COUNT (06:00-08:30)',
-                            'realtime': 'REALTIME MORNING MONITORING (08:30-11:55)',
-                            'lunch': 'LUNCH BREAK (11:55-13:15)',
-                            'afternoon': 'AFTERNOON MONITORING (13:15-end)'
+                            'morning': 'ĐẾM SÁNG (06:00-08:30)',
+                            'realtime': 'GIÁM SÁT SÁNG THỜI GIAN THỰC (08:30-11:55)',
+                            'lunch': 'NGHỈ TRƯA (11:55-13:15)',
+                            'afternoon': 'GIÁM SÁT CHIỀU (13:15-kết thúc)'
                         };
                         phaseText.textContent = phaseNames[data.phase] || data.phase.toUpperCase();
                     }
@@ -867,7 +867,7 @@ async def root():
                     
                     const errorEl = document.getElementById('error-message');
                     if (errorEl) {
-                        errorEl.textContent = 'Cannot reach API. Retrying...';
+                        errorEl.textContent = 'Không thể kết nối API. Đang thử lại...';
                         errorEl.style.display = 'block';
                     }
                 });

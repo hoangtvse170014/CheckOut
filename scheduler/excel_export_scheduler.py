@@ -38,7 +38,61 @@ class ExcelExportScheduler:
         self._export_interval_seconds = 30 * 60  # 30 minutes
         
         logger.info(f"ExcelExportScheduler initialized: db={db_path}, exports_dir={exports_dir}")
-    
+
+    def _cleanup_old_excel_files(self):
+        """
+        Clean up old Excel files, keeping only the last 5 days.
+        This method is called after each successful export.
+        """
+        try:
+            logger.info("Starting Excel file cleanup (keeping last 5 days)...")
+
+            # Get all Excel files in the daily directory
+            excel_files = list(self.daily_dir.glob("people_counter_*.xlsx"))
+            if not excel_files:
+                logger.debug("No Excel files found for cleanup")
+                return
+
+            # Sort files by date in filename (newest first)
+            def get_file_date(filepath):
+                """Extract date from filename like 'people_counter_2026-01-14.xlsx'"""
+                filename = filepath.name
+                if filename.startswith("people_counter_") and filename.endswith(".xlsx"):
+                    date_str = filename.replace("people_counter_", "").replace(".xlsx", "")
+                    try:
+                        return datetime.strptime(date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        return datetime.min.date()  # Invalid date, put at beginning
+                return datetime.min.date()  # Not a standard filename, put at beginning
+
+            excel_files.sort(key=get_file_date, reverse=True)
+
+            # Keep only the last 5 files (newest 5)
+            files_to_delete = excel_files[5:]  # Everything after index 5
+
+            if not files_to_delete:
+                logger.debug("No old Excel files to delete (keeping last 5)")
+                return
+
+            deleted_count = 0
+            for file_path in files_to_delete:
+                try:
+                    filename = file_path.name
+                    file_path.unlink()
+                    deleted_count += 1
+                    logger.info(f"Deleted old Excel file: {filename}")
+
+                except Exception as e:
+                    logger.error(f"Failed to delete Excel file {file_path}: {e}")
+
+            if deleted_count > 0:
+                logger.info(f"Excel cleanup completed: deleted {deleted_count} old files")
+            else:
+                logger.debug("Excel cleanup completed: no files deleted")
+
+        except Exception as e:
+            logger.error(f"Excel cleanup failed: {e}", exc_info=True)
+
     def start(self):
         """Start the background scheduler thread."""
         if self._running:
@@ -194,7 +248,11 @@ class ExcelExportScheduler:
                 morning_start=morning_start,
                 morning_end=morning_end
             )
-            
+
+            # Clean up old Excel files (keep only last 5 days)
+            if result:
+                self._cleanup_old_excel_files()
+
             return result
             
         except Exception as e:

@@ -611,6 +611,23 @@ class PeopleCounterApp:
                 # Realtime monitoring phase: Hiển thị Total và Realtime
                 initial_total = self.initial_count_in - self.initial_count_out
                 realtime_count = initial_total + (self.realtime_in - self.realtime_out)
+
+                # AUTO ALERT: Trigger immediate alert when missing people detected
+                if initial_total > 0 and realtime_count < initial_total and self.alert_manager:
+                    missing_count = initial_total - realtime_count
+
+                    # DEBUG: Log trigger conditions
+                    logger.info(f"🚨 ALERT CHECK: initial_total={initial_total}, realtime_count={realtime_count}, missing={missing_count}")
+
+                    # Always trigger immediate alert when missing people detected (simplified logic)
+                    current_session = self.time_manager.get_current_session()
+                    logger.info(f"🚨 AUTO ALERT: Missing people detected! Triggering immediate alert - session={current_session}, missing={missing_count}")
+                    self.alert_manager.trigger_immediate_alert(
+                        session=current_session,
+                        total_morning=initial_total,
+                        realtime_count=realtime_count
+                    )
+
                 info_text = [
                     f"=== REALTIME MONITORING ===",
                     f"Total: {initial_total} (initial: IN {self.initial_count_in} - OUT {self.initial_count_out})",
@@ -705,8 +722,12 @@ class PeopleCounterApp:
                 from pathlib import Path
                 output_file = Path("exports") / "daily" / f"people_counter_{today}.xlsx"
                 logger.info(f"Creating new Excel file for today: {output_file.name}")
-                self.excel_export_scheduler._export_daily_excel(today, output_file)
-                logger.info(f"New Excel file created successfully: {output_file.name}")
+                result = self.excel_export_scheduler._export_daily_excel(today, output_file)
+                if result:
+                    logger.info(f"New Excel file created successfully: {output_file.name}")
+                    # Cleanup is done automatically in _export_daily_excel
+                else:
+                    logger.error(f"Failed to create new Excel file: {output_file.name}")
             except Exception as e:
                 logger.error(f"Error creating new Excel file: {e}", exc_info=True)
         
@@ -1225,7 +1246,11 @@ class PeopleCounterApp:
                 from pathlib import Path
                 output_file = Path("exports") / "daily" / f"people_counter_{today}.xlsx"
                 logger.info("Forcing final Excel export before shutdown...")
-                self.excel_export_scheduler._export_daily_excel(today, output_file)
+                result = self.excel_export_scheduler._export_daily_excel(today, output_file)
+                if result:
+                    logger.info("Final Excel export completed successfully")
+                else:
+                    logger.error("Final Excel export failed")
             except Exception as e:
                 logger.error(f"Error during final export: {e}", exc_info=True)
             self.excel_export_scheduler.stop()
