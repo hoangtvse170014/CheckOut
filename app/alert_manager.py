@@ -138,13 +138,18 @@ class AlertManager:
                 logger.debug(f"Alert cooldown active: {time_since_last_alert:.1f} min ago, skipping")
                 return
 
-        # RULE: Send email ONLY IF MISSING > 0 (no minimum duration required)
+        # RULE: Send email ONLY IF MISSING > 0 and duration >= 30 minutes
         if missing_count <= 0:
             print(f"[ALERT_CHECK] No missing people (MISSING={missing_count}), skipping alert")
             logger.debug(f"No missing people, skipping alert: MISSING={missing_count}")
             return
-        
-        # RULE: Send email ONLY IF missing lasts >= 30 minutes AND not alerted before for this period
+
+        # RULE: Send email ONLY IF missing lasts >= 30 minutes
+        if duration_minutes < 30.0:
+            print(f"[ALERT_CHECK] Missing duration {duration_minutes:.1f} min < 30 min, waiting...")
+            logger.debug(f"Missing duration {duration_minutes:.1f} min < 30 min, skipping alert")
+            return
+
         print(f"[ALERT_CHECK] Sending alert: MISSING={missing_count} for {duration_minutes:.1f} minutes")
 
         # Create alert message with required content
@@ -218,7 +223,8 @@ Camera ID: {self.camera_id}
                 total_morning = self.storage.get_total_morning_from_events(today, morning_start, morning_end)
 
             if realtime_count is None:
-                realtime_count = self.storage.get_current_realtime_count()
+                today = datetime.now(self.tz).strftime("%Y-%m-%d")
+                realtime_count = self.storage.get_current_realtime_count(today, self.camera_id)
 
             if total_morning <= 0:
                 logger.debug("No total_morning data available, skipping immediate alert")
